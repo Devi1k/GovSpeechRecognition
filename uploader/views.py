@@ -144,10 +144,11 @@ def clean_sound_cache():
 
 def clean_log():
     path = 'log/'
-    path2 = 'exp/log'
+    path2 = 'exp/log/'
     timestamp = strftime("%Y%m%d%H%M%S", gmtime())
     today_m = int(timestamp[4:6])  # 今天的月份
     today_y = int(timestamp[0:4])  # 今天的年份
+    log.info('clean web log')
     for i in os.listdir(path):
         if len(i) < 4:
             continue
@@ -162,6 +163,7 @@ def clean_log():
         elif file_y < today_y:
             if os.path.exists(file_path):
                 os.remove(file_path)
+    log.info('clean speech log')
     for i in os.listdir(path2):
         file_path = path2 + i  # 生成日志文件的路径
         file_m = int(i[32:34])  # 日志的月份
