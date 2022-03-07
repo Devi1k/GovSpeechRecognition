@@ -42,16 +42,15 @@ from paddlespeech.s2t.training.trainer import Trainer
 from paddlespeech.s2t.utils import error_rate
 from paddlespeech.s2t.utils import layer_tools
 from paddlespeech.s2t.utils import mp_tools
-from paddlespeech.s2t.utils.log import Autolog
-from paddlespeech.s2t.utils.log import Log
 from paddlespeech.s2t.utils.utility import UpdateConfig
 
-logger = Log(__name__).getlog()
+
+# logger = Log(__name__).getlog()
 
 
 class DeepSpeech2Trainer(Trainer):
     @classmethod
-    def params(cls, config: Optional[CfgNode]=None) -> CfgNode:
+    def params(cls, config: Optional[CfgNode] = None) -> CfgNode:
         # training config
         default = CfgNode(
             dict(
@@ -120,7 +119,7 @@ class DeepSpeech2Trainer(Trainer):
 
     @paddle.no_grad()
     def valid(self):
-        logger.info(f"Valid Total Examples: {len(self.valid_loader.dataset)}")
+        # logger.info(f"Valid Total Examples: {len(self.valid_loader.dataset)}")
         self.model.eval()
         valid_losses = defaultdict(list)
         num_seen_utts = 1
@@ -145,10 +144,10 @@ class DeepSpeech2Trainer(Trainer):
                 msg += "batch : {}/{}, ".format(i + 1, len(self.valid_loader))
                 msg += ', '.join('{}: {:>.6f}'.format(k, v)
                                  for k, v in valid_dump.items())
-                logger.info(msg)
+                # logger.info(msg)
 
-        logger.info('Rank {} Val info val_loss {}'.format(
-            dist.get_rank(), total_loss / num_seen_utts))
+        # logger.info('Rank {} Val info val_loss {}'.format(
+        #     dist.get_rank(), total_loss / num_seen_utts))
         return total_loss, num_seen_utts
 
     def setup_model(self):
@@ -170,10 +169,10 @@ class DeepSpeech2Trainer(Trainer):
         if self.parallel:
             model = paddle.DataParallel(model)
 
-        logger.info(f"{model}")
-        layer_tools.print_params(model, logger.info)
+        # logger.info(f"{model}")
+        # layer_tools.print_params(model, logger.info)
         self.model = model
-        logger.info("Setup model!")
+        # logger.info("Setup model!")
 
         if not self.train:
             return
@@ -192,7 +191,7 @@ class DeepSpeech2Trainer(Trainer):
             grad_clip=grad_clip)
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
-        logger.info("Setup optimizer/lr_scheduler!")
+        # logger.info("Setup optimizer/lr_scheduler!")
 
     def setup_dataloader(self):
         config = self.config.clone()
@@ -242,7 +241,7 @@ class DeepSpeech2Trainer(Trainer):
                 drop_last=False,
                 collate_fn=collate_fn_dev,
                 num_workers=config.collator.num_workers)
-            logger.info("Setup train/valid  Dataloader!")
+            # logger.info("Setup train/valid  Dataloader!")
         else:
             # test
             config.data.manifest = config.data.test_manifest
@@ -259,7 +258,7 @@ class DeepSpeech2Trainer(Trainer):
                 drop_last=False,
                 collate_fn=collate_fn_test,
                 num_workers=config.collator.num_workers)
-            logger.info("Setup test  Dataloader!")
+            # logger.info("Setup test  Dataloader!")
 
 
 class DeepSpeech2Tester(DeepSpeech2Trainer):
@@ -325,11 +324,11 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
             num_ins += 1
             if fout:
                 fout.write({"utt": utt, "ref": target, "hyp": result})
-            logger.info(f"Utt: {utt}")
-            logger.info(f"Ref: {target}")
-            logger.info(f"Hyp: {result}")
-            logger.info("Current error rate [%s] = %f" %
-                        (cfg.error_rate_type, error_rate_func(target, result)))
+            # logger.info(f"Utt: {utt}")
+            # logger.info(f"Ref: {target}")
+            # logger.info(f"Hyp: {result}")
+            # logger.info("Current error rate [%s] = %f" %
+            #             (cfg.error_rate_type, error_rate_func(target, result)))
 
         return dict(
             errors_sum=errors_sum,
@@ -362,7 +361,7 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
     @mp_tools.rank_zero_only
     @paddle.no_grad()
     def test(self):
-        logger.info(f"Test Total Examples: {len(self.test_loader.dataset)}")
+        # logger.info(f"Test Total Examples: {len(self.test_loader.dataset)}")
         # self.autolog = Autolog(
         #     batch_size=self.config.decoding.batch_size,
         #     model_name="deepspeech2",
@@ -380,8 +379,8 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
                 len_refs += metrics['len_refs']
                 num_ins += metrics['num_ins']
                 error_rate_type = metrics['error_rate_type']
-                logger.info("Error rate [%s] (%d/?) = %f" %
-                            (error_rate_type, num_ins, errors_sum / len_refs))
+                # logger.info("Error rate [%s] (%d/?) = %f" %
+                #             (error_rate_type, num_ins, errors_sum / len_refs))
 
         # logging
         msg = "Test: "
@@ -389,7 +388,7 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
         msg += "step: {}, ".format(self.iteration)
         msg += "Final error rate [%s] (%d/%d) = %f" % (
             error_rate_type, num_ins, num_ins, errors_sum / len_refs)
-        logger.info(msg)
+        # logger.info(msg)
         # self.autolog.report()
 
     @paddle.no_grad()
@@ -406,7 +405,7 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
         infer_model.eval()
         feat_dim = self.test_loader.collate_fn.feature_size
         static_model = infer_model.export()
-        logger.info(f"Export code: {static_model.forward.code}")
+        # logger.info(f"Export code: {static_model.forward.code}")
         paddle.jit.save(static_model, self.args.export_path)
 
 

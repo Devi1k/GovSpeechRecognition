@@ -12,20 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Contains the text featurizer class."""
-from pprint import pformat
 
 import sentencepiece as spm
 
 from ..utility import BLANK
 from ..utility import EOS
-from ..utility import load_dict
 from ..utility import MASKCTC
 from ..utility import SOS
 from ..utility import SPACE
 from ..utility import UNK
-from paddlespeech.s2t.utils.log import Log
+from ..utility import load_dict
 
-logger = Log(__name__).getlog()
+# logger = Log(__name__).getlog()
 
 __all__ = ["TextFeaturizer"]
 
@@ -207,7 +205,7 @@ class TextFeaturizer():
         """Load vocabulary from file."""
         vocab_list = load_dict(vocab_filepath, maskctc)
         assert vocab_list is not None
-        logger.debug(f"Vocab: {pformat(vocab_list)}")
+        # logger.debug(f"Vocab: {pformat(vocab_list)}")
 
         id2token = dict(
             [(idx, token) for (idx, token) in enumerate(vocab_list)])
@@ -221,10 +219,10 @@ class TextFeaturizer():
         sos_id = vocab_list.index(SOS) if SOS in vocab_list else -1
         space_id = vocab_list.index(SPACE) if SPACE in vocab_list else -1
 
-        logger.info(f"BLANK id: {blank_id}")
-        logger.info(f"UNK id: {unk_id}")
-        logger.info(f"EOS id: {eos_id}")
-        logger.info(f"SOS id: {sos_id}")
-        logger.info(f"SPACE id: {space_id}")
-        logger.info(f"MASKCTC id: {maskctc_id}")
+        # logger.info(f"BLANK id: {blank_id}")
+        # logger.info(f"UNK id: {unk_id}")
+        # logger.info(f"EOS id: {eos_id}")
+        # logger.info(f"SOS id: {sos_id}")
+        # logger.info(f"SPACE id: {space_id}")
+        # logger.info(f"MASKCTC id: {maskctc_id}")
         return token2id, id2token, vocab_list, unk_id, eos_id, blank_id

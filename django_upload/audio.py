@@ -1,4 +1,3 @@
-import array
 import struct
 import wave
 
@@ -9,7 +8,7 @@ print(info)
 print(info[22:24])
 print(struct.unpack('h', info[0:2])[0])
 print(struct.unpack('<i', info[40:44])[0])
-file = wave.open('demo1.wav', 'wb')
+file = wave.open('../data/demo_cache/demo1.wav', 'wb')
 file.setnchannels(2)
 file.setsampwidth(2)
 file.setframerate(16000)

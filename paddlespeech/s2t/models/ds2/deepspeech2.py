@@ -21,11 +21,9 @@ from yacs.config import CfgNode
 from paddlespeech.s2t.models.ds2.conv import ConvStack
 from paddlespeech.s2t.models.ds2.rnn import RNNStack
 from paddlespeech.s2t.modules.ctc import CTCDecoder
-from paddlespeech.s2t.utils import layer_tools
 from paddlespeech.s2t.utils.checkpoint import Checkpoint
-from paddlespeech.s2t.utils.log import Log
 
-logger = Log(__name__).getlog()
+# logger = Log(__name__).getlog()
 
 __all__ = ['DeepSpeech2Model', 'DeepSpeech2InferModel']
 
@@ -220,9 +218,9 @@ class DeepSpeech2Model(nn.Layer):
         """
         model = cls(
             feat_size=dataloader.collate_fn.feature_size,
-            #feat_size=dataloader.dataset.feature_size,
+            # feat_size=dataloader.dataset.feature_size,
             dict_size=dataloader.collate_fn.vocab_size,
-            #dict_size=dataloader.dataset.vocab_size,
+            # dict_size=dataloader.dataset.vocab_size,
             num_conv_layers=config.model.num_conv_layers,
             num_rnn_layers=config.model.num_rnn_layers,
             rnn_size=config.model.rnn_layer_size,
