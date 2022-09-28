@@ -13,6 +13,7 @@
 # limitations under the License.
 # Modified from espnet(https://github.com/espnet/espnet)
 import io
+import json
 
 import h5py
 import kaldiio
@@ -152,8 +153,49 @@ class UtteranceCMVN():
             x = np.subtract(x, mean)
 
         if self.norm_vars:
-            var = square_sums / x.shape[0] - mean**2
+            var = square_sums / x.shape[0] - mean ** 2
             std = np.maximum(np.sqrt(var), self.std_floor)
             x = np.divide(x, std)
 
+        return x
+
+
+class GlobalCMVN():
+    "Apply Global CMVN"
+
+    def __init__(self,
+                 cmvn_path,
+                 norm_means=True,
+                 norm_vars=True,
+                 std_floor=1.0e-20):
+        # cmvn_path: Option[str, dict]
+        cmvn = cmvn_path
+        self.cmvn = cmvn
+        self.norm_means = norm_means
+        self.norm_vars = norm_vars
+        self.std_floor = std_floor
+        if isinstance(cmvn, dict):
+            cmvn_stats = cmvn
+        else:
+            with open(cmvn) as f:
+                cmvn_stats = json.load(f)
+        self.count = cmvn_stats['frame_num']
+        self.mean = np.array(cmvn_stats['mean_stat']) / self.count
+        self.square_sums = np.array(cmvn_stats['var_stat'])
+        self.var = self.square_sums / self.count - self.mean ** 2
+        self.std = np.maximum(np.sqrt(self.var), self.std_floor)
+
+    def __repr__(self):
+        return f"""{self.__class__.__name__}(
+            cmvn_path={self.cmvn},
+            norm_means={self.norm_means},
+            norm_vars={self.norm_vars},)"""
+
+    def __call__(self, x, uttid=None):
+        # x: [Time, Dim]
+        if self.norm_means:
+            x = np.subtract(x, self.mean)
+
+        if self.norm_vars:
+            x = np.divide(x, self.std)
         return x

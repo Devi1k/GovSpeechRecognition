@@ -1,4 +1,5 @@
 # Copyright (c) 2021 PaddlePaddle Authors. All Rights Reserved.
+# Copyright 2019 Mobvoi Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -53,7 +54,7 @@ def make_pad_mask(lengths: paddle.Tensor) -> paddle.Tensor:
                  [0, 0, 0, 1, 1],
                  [0, 0, 1, 1, 1]]
     """
-    # (TODO: Hui Zhang): jit not support Tenosr.dim() and Tensor.ndim
+    # (TODO: Hui Zhang): jit not support Tensor.dim() and Tensor.ndim
     # assert lengths.dim() == 1
     batch_size = int(lengths.shape[0])
     max_len = int(lengths.max())

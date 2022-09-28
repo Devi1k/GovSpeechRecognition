@@ -19,7 +19,7 @@ from pathlib import Path
 
 import paddle
 from paddle import distributed as dist
-from tensorboardX import SummaryWriter
+from visualdl import LogWriter
 
 from paddlespeech.s2t.training.reporter import ObsScope
 from paddlespeech.s2t.training.reporter import report
@@ -28,9 +28,9 @@ from paddlespeech.s2t.utils import mp_tools
 from paddlespeech.s2t.utils import profiler
 from paddlespeech.s2t.utils.checkpoint import Checkpoint
 from paddlespeech.s2t.utils.log import Log
+from paddlespeech.s2t.utils.utility import UpdateConfig
 from paddlespeech.s2t.utils.utility import all_version
 from paddlespeech.s2t.utils.utility import seed_all
-from paddlespeech.s2t.utils.utility import UpdateConfig
 
 __all__ = ["Trainer"]
 
@@ -88,8 +88,8 @@ class Trainer():
     >>>     config.merge_from_list(args.opts)
     >>> config.freeze()
     >>>
-    >>> if args.nprocs > 0:
-    >>>     dist.spawn(main_sp, args=(config, args), nprocs=args.nprocs)
+    >>> if args.ngpu > 1:
+    >>>     dist.spawn(main_sp, args=(config, args), nprocs=args.ngpu)
     >>> else:
     >>>     main_sp(config, args)
     """
@@ -112,13 +112,13 @@ class Trainer():
         logger.info(f"Rank: {self.rank}/{self.world_size}")
 
         # set device
-        paddle.set_device('gpu' if self.args.nprocs > 0 else 'cpu')
+        paddle.set_device('gpu' if self.args.ngpu > 0 else 'cpu')
         if self.parallel:
             self.init_parallel()
 
         self.checkpoint = Checkpoint(
-            kbest_n=self.config.training.checkpoint.kbest_n,
-            latest_n=self.config.training.checkpoint.latest_n)
+            kbest_n=self.config.checkpoint.kbest_n,
+            latest_n=self.config.checkpoint.latest_n)
 
         # set random seed if needed
         if args.seed:
@@ -129,8 +129,8 @@ class Trainer():
         if hasattr(self.args,
                    "benchmark_batch_size") and self.args.benchmark_batch_size:
             with UpdateConfig(self.config):
-                self.config.collator.batch_size = self.args.benchmark_batch_size
-                self.config.training.log_interval = 1
+                self.config.batch_size = self.args.benchmark_batch_size
+                self.config.log_interval = 1
             logger.info(
                 f"Benchmark reset batch-size: {self.args.benchmark_batch_size}")
 
@@ -162,7 +162,7 @@ class Trainer():
         """A flag indicating whether the experiment should run with
         multiprocessing.
         """
-        return self.args.nprocs > 1
+        return self.args.ngpu > 1
 
     def init_parallel(self):
         """Init environment for multiprocess training.
@@ -221,6 +221,8 @@ class Trainer():
         if hasattr(self.train_loader, "batch_sampler"):
             batch_sampler = self.train_loader.batch_sampler
             if isinstance(batch_sampler, paddle.io.DistributedBatchSampler):
+                logger.debug(
+                    f"train_loader.batch_sample.set_epoch: {self.epoch}")
                 batch_sampler.set_epoch(self.epoch)
 
     def before_train(self):
@@ -245,19 +247,19 @@ class Trainer():
         self.maybe_batch_sampler_step()
 
     def after_train_batch(self):
-        if self.args.benchmark_max_step and self.iteration > self.args.benchmark_max_step:
+        if self.args.benchmark_max_step:
             profiler.add_profiler_step(self.args.profiler_options)
+        if self.args.benchmark_max_step and self.iteration > self.args.benchmark_max_step:
             logger.info(
                 f"Reach benchmark-max-step: {self.args.benchmark_max_step}")
-            sys.exit(
-                f"Reach benchmark-max-step: {self.args.benchmark_max_step}")
+            sys.exit(0)
 
     def do_train(self):
         """The training process control by epoch."""
         self.before_train()
 
         logger.info(f"Train Total Examples: {len(self.train_loader.dataset)}")
-        while self.epoch < self.config.training.n_epoch:
+        while self.epoch < self.config.n_epoch:
             with Timer("Epoch-Train Time Cost: {}"):
                 self.model.train()
                 try:
@@ -279,8 +281,8 @@ class Trainer():
                         observation['batch_cost'] = observation[
                             'reader_cost'] + observation['step_cost']
                         observation['samples'] = observation['batch_size']
-                        observation['ips[sent./sec]'] = observation[
-                            'batch_size'] / observation['batch_cost']
+                        observation['ips samples/s'] = observation[
+                                                           'batch_size'] / observation['batch_cost']
                         for k, v in observation.items():
                             msg += f" {k}: "
                             msg += f"{v:>.8f}" if isinstance(v,
@@ -309,9 +311,10 @@ class Trainer():
             logger.info(
                 'Epoch {} Val info val_loss {}'.format(self.epoch, cv_loss))
             if self.visualizer:
-                self.visualizer.add_scalars(
-                    'epoch', {'cv_loss': cv_loss,
-                              'lr': self.lr_scheduler()}, self.epoch)
+                self.visualizer.add_scalar(
+                    tag='eval/cv_loss', value=cv_loss, step=self.epoch)
+                self.visualizer.add_scalar(
+                    tag='eval/lr', value=self.lr_scheduler(), step=self.epoch)
 
             # after epoch
             self.save(tag=self.epoch, infos={'val_loss': cv_loss})
@@ -427,7 +430,7 @@ class Trainer():
         unexpected behaviors.
         """
         # visualizer
-        visualizer = SummaryWriter(logdir=str(self.visual_dir))
+        visualizer = LogWriter(logdir=str(self.visual_dir))
         self.visualizer = visualizer
 
     @mp_tools.rank_zero_only

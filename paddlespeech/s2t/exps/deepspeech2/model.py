@@ -16,7 +16,6 @@ import os
 import time
 from collections import defaultdict
 from contextlib import nullcontext
-from typing import Optional
 
 import jsonlines
 import numpy as np
@@ -24,7 +23,6 @@ import paddle
 from paddle import distributed as dist
 from paddle import inference
 from paddle.io import DataLoader
-from yacs.config import CfgNode
 
 from paddlespeech.s2t.frontend.featurizer.text_featurizer import TextFeaturizer
 from paddlespeech.s2t.io.collator import SpeechCollator
@@ -42,35 +40,19 @@ from paddlespeech.s2t.training.trainer import Trainer
 from paddlespeech.s2t.utils import error_rate
 from paddlespeech.s2t.utils import layer_tools
 from paddlespeech.s2t.utils import mp_tools
+from paddlespeech.s2t.utils.log import Log
 from paddlespeech.s2t.utils.utility import UpdateConfig
 
-
-# logger = Log(__name__).getlog()
+logger = Log(__name__).getlog()
 
 
 class DeepSpeech2Trainer(Trainer):
-    @classmethod
-    def params(cls, config: Optional[CfgNode] = None) -> CfgNode:
-        # training config
-        default = CfgNode(
-            dict(
-                lr=5e-4,  # learning rate
-                lr_decay=1.0,  # learning rate decay
-                weight_decay=1e-6,  # the coeff of weight decay
-                global_grad_clip=5.0,  # the global norm clip
-                n_epoch=50,  # train epochs
-            ))
-
-        if config is not None:
-            config.merge_from_other_cfg(default)
-        return default
-
     def __init__(self, config, args):
         super().__init__(config, args)
 
     def train_batch(self, batch_index, batch_data, msg):
-        batch_size = self.config.collator.batch_size
-        accum_grad = self.config.training.accum_grad
+        batch_size = self.config.batch_size
+        accum_grad = self.config.accum_grad
 
         start = time.time()
 
@@ -119,7 +101,7 @@ class DeepSpeech2Trainer(Trainer):
 
     @paddle.no_grad()
     def valid(self):
-        # logger.info(f"Valid Total Examples: {len(self.valid_loader.dataset)}")
+        logger.info(f"Valid Total Examples: {len(self.valid_loader.dataset)}")
         self.model.eval()
         valid_losses = defaultdict(list)
         num_seen_utts = 1
@@ -133,7 +115,7 @@ class DeepSpeech2Trainer(Trainer):
                 total_loss += float(loss) * num_utts
                 valid_losses['val_loss'].append(float(loss))
 
-            if (i + 1) % self.config.training.log_interval == 0:
+            if (i + 1) % self.config.log_interval == 0:
                 valid_dump = {k: np.mean(v) for k, v in valid_losses.items()}
                 valid_dump['val_history_loss'] = total_loss / num_seen_utts
 
@@ -144,149 +126,125 @@ class DeepSpeech2Trainer(Trainer):
                 msg += "batch : {}/{}, ".format(i + 1, len(self.valid_loader))
                 msg += ', '.join('{}: {:>.6f}'.format(k, v)
                                  for k, v in valid_dump.items())
-                # logger.info(msg)
+                logger.info(msg)
 
-        # logger.info('Rank {} Val info val_loss {}'.format(
-        #     dist.get_rank(), total_loss / num_seen_utts))
+        logger.info('Rank {} Val info val_loss {}'.format(
+            dist.get_rank(), total_loss / num_seen_utts))
         return total_loss, num_seen_utts
 
     def setup_model(self):
         config = self.config.clone()
         with UpdateConfig(config):
             if self.train:
-                config.model.feat_size = self.train_loader.collate_fn.feature_size
-                config.model.dict_size = self.train_loader.collate_fn.vocab_size
+                config.input_dim = self.train_loader.collate_fn.feature_size
+                config.output_dim = self.train_loader.collate_fn.vocab_size
             else:
-                config.model.feat_size = self.test_loader.collate_fn.feature_size
-                config.model.dict_size = self.test_loader.collate_fn.vocab_size
+                config.input_dim = self.test_loader.collate_fn.feature_size
+                config.output_dim = self.test_loader.collate_fn.vocab_size
 
         if self.args.model_type == 'offline':
-            model = DeepSpeech2Model.from_config(config.model)
+            model = DeepSpeech2Model.from_config(config)
         elif self.args.model_type == 'online':
-            model = DeepSpeech2ModelOnline.from_config(config.model)
+            model = DeepSpeech2ModelOnline.from_config(config)
         else:
             raise Exception("wrong model type")
         if self.parallel:
             model = paddle.DataParallel(model)
 
-        # logger.info(f"{model}")
-        # layer_tools.print_params(model, logger.info)
+        logger.info(f"{model}")
+        layer_tools.print_params(model, logger.info)
         self.model = model
-        # logger.info("Setup model!")
+        logger.info("Setup model!")
 
         if not self.train:
             return
 
-        grad_clip = ClipGradByGlobalNormWithLog(
-            config.training.global_grad_clip)
+        grad_clip = ClipGradByGlobalNormWithLog(config.global_grad_clip)
         lr_scheduler = paddle.optimizer.lr.ExponentialDecay(
-            learning_rate=config.training.lr,
-            gamma=config.training.lr_decay,
-            verbose=True)
+            learning_rate=config.lr, gamma=config.lr_decay, verbose=True)
         optimizer = paddle.optimizer.Adam(
             learning_rate=lr_scheduler,
             parameters=model.parameters(),
-            weight_decay=paddle.regularizer.L2Decay(
-                config.training.weight_decay),
+            weight_decay=paddle.regularizer.L2Decay(config.weight_decay),
             grad_clip=grad_clip)
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
-        # logger.info("Setup optimizer/lr_scheduler!")
+        logger.info("Setup optimizer/lr_scheduler!")
 
     def setup_dataloader(self):
         config = self.config.clone()
         config.defrost()
         if self.train:
             # train
-            config.data.manifest = config.data.train_manifest
+            config.manifest = config.train_manifest
             train_dataset = ManifestDataset.from_config(config)
             if self.parallel:
                 batch_sampler = SortagradDistributedBatchSampler(
                     train_dataset,
-                    batch_size=config.collator.batch_size,
+                    batch_size=config.batch_size,
                     num_replicas=None,
                     rank=None,
                     shuffle=True,
                     drop_last=True,
-                    sortagrad=config.collator.sortagrad,
-                    shuffle_method=config.collator.shuffle_method)
+                    sortagrad=config.sortagrad,
+                    shuffle_method=config.shuffle_method)
             else:
                 batch_sampler = SortagradBatchSampler(
                     train_dataset,
                     shuffle=True,
-                    batch_size=config.collator.batch_size,
+                    batch_size=config.batch_size,
                     drop_last=True,
-                    sortagrad=config.collator.sortagrad,
-                    shuffle_method=config.collator.shuffle_method)
+                    sortagrad=config.sortagrad,
+                    shuffle_method=config.shuffle_method)
 
-            config.collator.keep_transcription_text = False
+            config.keep_transcription_text = False
             collate_fn_train = SpeechCollator.from_config(config)
             self.train_loader = DataLoader(
                 train_dataset,
                 batch_sampler=batch_sampler,
                 collate_fn=collate_fn_train,
-                num_workers=config.collator.num_workers)
+                num_workers=config.num_workers)
 
             # dev
-            config.data.manifest = config.data.dev_manifest
+            config.manifest = config.dev_manifest
             dev_dataset = ManifestDataset.from_config(config)
 
-            config.collator.augmentation_config = ""
-            config.collator.keep_transcription_text = False
+            config.augmentation_config = ""
+            config.keep_transcription_text = False
             collate_fn_dev = SpeechCollator.from_config(config)
             self.valid_loader = DataLoader(
                 dev_dataset,
-                batch_size=int(config.collator.batch_size),
+                batch_size=int(config.batch_size),
                 shuffle=False,
                 drop_last=False,
                 collate_fn=collate_fn_dev,
-                num_workers=config.collator.num_workers)
-            # logger.info("Setup train/valid  Dataloader!")
+                num_workers=config.num_workers)
+            logger.info("Setup train/valid  Dataloader!")
         else:
             # test
-            config.data.manifest = config.data.test_manifest
+            config.manifest = config.test_manifest
             test_dataset = ManifestDataset.from_config(config)
 
-            config.collator.augmentation_config = ""
-            config.collator.keep_transcription_text = True
+            config.augmentation_config = ""
+            config.keep_transcription_text = True
             collate_fn_test = SpeechCollator.from_config(config)
-
+            decode_batch_size = config.get('decode', dict()).get(
+                'decode_batch_size', 1)
             self.test_loader = DataLoader(
                 test_dataset,
-                batch_size=config.decoding.batch_size,
+                batch_size=decode_batch_size,
                 shuffle=False,
                 drop_last=False,
                 collate_fn=collate_fn_test,
-                num_workers=config.collator.num_workers)
-            # logger.info("Setup test  Dataloader!")
+                num_workers=config.num_workers)
+            logger.info("Setup test  Dataloader!")
 
 
 class DeepSpeech2Tester(DeepSpeech2Trainer):
-    @classmethod
-    def params(cls, config: Optional[CfgNode]=None) -> CfgNode:
-        # testing config
-        default = CfgNode(
-            dict(
-                alpha=2.5,  # Coef of LM for beam search.
-                beta=0.3,  # Coef of WC for beam search.
-                cutoff_prob=1.0,  # Cutoff probability for pruning.
-                cutoff_top_n=40,  # Cutoff number for pruning.
-                lang_model_path='models/lm/common_crawl_00.prune01111.trie.klm',  # Filepath for language model.
-                decoding_method='ctc_beam_search',  # Decoding method. Options: ctc_beam_search, ctc_greedy
-                error_rate_type='wer',  # Error rate type for evaluation. Options `wer`, 'cer'
-                num_proc_bsearch=8,  # # of CPUs for beam search.
-                beam_size=500,  # Beam search width.
-                batch_size=128,  # decoding batch size
-            ))
-
-        if config is not None:
-            config.merge_from_other_cfg(default)
-        return default
-
     def __init__(self, config, args):
         super().__init__(config, args)
         self._text_featurizer = TextFeaturizer(
-            unit_type=config.collator.unit_type, vocab_filepath=None)
+            unit_type=config.unit_type, vocab=None)
 
     def ordid2token(self, texts, texts_len):
         """ ord() id to chr() chr """
@@ -304,17 +262,14 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
                         texts,
                         texts_len,
                         fout=None):
-        cfg = self.config.decoding
+        decode_cfg = self.config.decode
         errors_sum, len_refs, num_ins = 0.0, 0, 0
-        errors_func = error_rate.char_errors if cfg.error_rate_type == 'cer' else error_rate.word_errors
-        error_rate_func = error_rate.cer if cfg.error_rate_type == 'cer' else error_rate.wer
-
-        vocab_list = self.test_loader.collate_fn.vocab_list
+        errors_func = error_rate.char_errors if decode_cfg.error_rate_type == 'cer' else error_rate.word_errors
+        error_rate_func = error_rate.cer if decode_cfg.error_rate_type == 'cer' else error_rate.wer
 
         target_transcripts = self.ordid2token(texts, texts_len)
 
-        result_transcripts = self.compute_result_transcripts(audio, audio_len,
-                                                             vocab_list, cfg)
+        result_transcripts = self.compute_result_transcripts(audio, audio_len)
 
         for utt, target, result in zip(utts, target_transcripts,
                                        result_transcripts):
@@ -324,52 +279,42 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
             num_ins += 1
             if fout:
                 fout.write({"utt": utt, "ref": target, "hyp": result})
-            # logger.info(f"Utt: {utt}")
-            # logger.info(f"Ref: {target}")
-            # logger.info(f"Hyp: {result}")
-            # logger.info("Current error rate [%s] = %f" %
-            #             (cfg.error_rate_type, error_rate_func(target, result)))
+            logger.info(f"Utt: {utt}")
+            logger.info(f"Ref: {target}")
+            logger.info(f"Hyp: {result}")
+            logger.info(
+                "Current error rate [%s] = %f" %
+                (decode_cfg.error_rate_type, error_rate_func(target, result)))
 
         return dict(
             errors_sum=errors_sum,
             len_refs=len_refs,
             num_ins=num_ins,
             error_rate=errors_sum / len_refs,
-            error_rate_type=cfg.error_rate_type)
+            error_rate_type=decode_cfg.error_rate_type)
 
-    def compute_result_transcripts(self, audio, audio_len, vocab_list, cfg):
-        # self.autolog.times.start()
-        # self.autolog.times.stamp()
-        result_transcripts = self.model.decode(
-            audio,
-            audio_len,
-            vocab_list,
-            decoding_method=cfg.decoding_method,
-            lang_model_path=cfg.lang_model_path,
-            beam_alpha=cfg.alpha,
-            beam_beta=cfg.beta,
-            beam_size=cfg.beam_size,
-            cutoff_prob=cfg.cutoff_prob,
-            cutoff_top_n=cfg.cutoff_top_n,
-            num_processes=cfg.num_proc_bsearch)
-
-        # self.autolog.times.stamp()
-        # self.autolog.times.stamp()
-        # self.autolog.times.end()
+    def compute_result_transcripts(self, audio, audio_len):
+        result_transcripts = self.model.decode(audio, audio_len)
         return result_transcripts
 
     @mp_tools.rank_zero_only
     @paddle.no_grad()
     def test(self):
-        # logger.info(f"Test Total Examples: {len(self.test_loader.dataset)}")
-        # self.autolog = Autolog(
-        #     batch_size=self.config.decoding.batch_size,
-        #     model_name="deepspeech2",
-        #     model_precision="fp32").getlog()
+        logger.info(f"Test Total Examples: {len(self.test_loader.dataset)}")
         self.model.eval()
-        cfg = self.config
         error_rate_type = None
         errors_sum, len_refs, num_ins = 0.0, 0, 0
+
+        # Initialized the decoder in model
+        decode_cfg = self.config.decode
+        vocab_list = self.test_loader.collate_fn.vocab_list
+        decode_batch_size = self.test_loader.batch_size
+        self.model.decoder.init_decoder(
+            decode_batch_size, vocab_list, decode_cfg.decoding_method,
+            decode_cfg.lang_model_path, decode_cfg.alpha, decode_cfg.beta,
+            decode_cfg.beam_size, decode_cfg.cutoff_prob,
+            decode_cfg.cutoff_top_n, decode_cfg.num_proc_bsearch)
+
         with jsonlines.open(self.args.result_file, 'w') as fout:
             for i, batch in enumerate(self.test_loader):
                 utts, audio, audio_len, texts, texts_len = batch
@@ -379,8 +324,8 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
                 len_refs += metrics['len_refs']
                 num_ins += metrics['num_ins']
                 error_rate_type = metrics['error_rate_type']
-                # logger.info("Error rate [%s] (%d/?) = %f" %
-                #             (error_rate_type, num_ins, errors_sum / len_refs))
+                logger.info("Error rate [%s] (%d/?) = %f" %
+                            (error_rate_type, num_ins, errors_sum / len_refs))
 
         # logging
         msg = "Test: "
@@ -388,8 +333,8 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
         msg += "step: {}, ".format(self.iteration)
         msg += "Final error rate [%s] (%d/%d) = %f" % (
             error_rate_type, num_ins, num_ins, errors_sum / len_refs)
-        # logger.info(msg)
-        # self.autolog.report()
+        logger.info(msg)
+        self.model.decoder.del_decoder()
 
     @paddle.no_grad()
     def export(self):
@@ -405,7 +350,7 @@ class DeepSpeech2Tester(DeepSpeech2Trainer):
         infer_model.eval()
         feat_dim = self.test_loader.collate_fn.feature_size
         static_model = infer_model.export()
-        # logger.info(f"Export code: {static_model.forward.code}")
+        logger.info(f"Export code: {static_model.forward.code}")
         paddle.jit.save(static_model, self.args.export_path)
 
 
@@ -413,27 +358,82 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
     def __init__(self, config, args):
         super().__init__(config, args)
         self.apply_static = True
+        self.args = args
 
-    def compute_result_transcripts(self, audio, audio_len, vocab_list, cfg):
+    @mp_tools.rank_zero_only
+    @paddle.no_grad()
+    def test(self):
+        logger.info(f"Test Total Examples: {len(self.test_loader.dataset)}")
+        if self.args.enable_auto_log is True:
+            from paddlespeech.s2t.utils.log import Autolog
+            self.autolog = Autolog(
+                batch_size=self.config.decode.decode_batch_size,
+                model_name="deepspeech2",
+                model_precision="fp32").getlog()
+        self.model.eval()
+        error_rate_type = None
+        errors_sum, len_refs, num_ins = 0.0, 0, 0
+
+        # Initialized the decoder in model
+        decode_cfg = self.config.decode
+        vocab_list = self.test_loader.collate_fn.vocab_list
         if self.args.model_type == "online":
-            output_probs, output_lens = self.static_forward_online(audio,
-                                                                   audio_len)
+            decode_batch_size = 1
+        elif self.args.model_type == "offline":
+            decode_batch_size = self.test_loader.batch_size
+        else:
+            raise Exception("wrong model type")
+        self.model.decoder.init_decoder(
+            decode_batch_size, vocab_list, decode_cfg.decoding_method,
+            decode_cfg.lang_model_path, decode_cfg.alpha, decode_cfg.beta,
+            decode_cfg.beam_size, decode_cfg.cutoff_prob,
+            decode_cfg.cutoff_top_n, decode_cfg.num_proc_bsearch)
+
+        with jsonlines.open(self.args.result_file, 'w') as fout:
+            for i, batch in enumerate(self.test_loader):
+                utts, audio, audio_len, texts, texts_len = batch
+                metrics = self.compute_metrics(utts, audio, audio_len, texts,
+                                               texts_len, fout)
+                errors_sum += metrics['errors_sum']
+                len_refs += metrics['len_refs']
+                num_ins += metrics['num_ins']
+                error_rate_type = metrics['error_rate_type']
+                logger.info("Error rate [%s] (%d/?) = %f" %
+                            (error_rate_type, num_ins, errors_sum / len_refs))
+        # logging
+        msg = "Test: "
+        msg += "epoch: {}, ".format(self.epoch)
+        msg += "step: {}, ".format(self.iteration)
+        msg += "Final error rate [%s] (%d/%d) = %f" % (
+            error_rate_type, num_ins, num_ins, errors_sum / len_refs)
+        logger.info(msg)
+        if self.args.enable_auto_log is True:
+            self.autolog.report()
+        self.model.decoder.del_decoder()
+
+    def compute_result_transcripts(self, audio, audio_len):
+        if self.args.model_type == "online":
+            output_probs, output_lens, trans_batch = self.static_forward_online(
+                audio, audio_len, decoder_chunk_size=1)
+            result_transcripts = [trans[-1] for trans in trans_batch]
         elif self.args.model_type == "offline":
             output_probs, output_lens = self.static_forward_offline(audio,
                                                                     audio_len)
+            batch_size = output_probs.shape[0]
+            self.model.decoder.reset_decoder(batch_size=batch_size)
+
+            self.model.decoder.next(output_probs, output_lens)
+
+            trans_best, trans_beam = self.model.decoder.decode()
+
+            result_transcripts = trans_best
+
         else:
             raise Exception("wrong model type")
 
         self.predictor.clear_intermediate_tensor()
         self.predictor.try_shrink_memory()
 
-        self.model.decoder.init_decode(cfg.alpha, cfg.beta, cfg.lang_model_path,
-                                       vocab_list, cfg.decoding_method)
-
-        result_transcripts = self.model.decoder.decode_probs(
-            output_probs, output_lens, vocab_list, cfg.decoding_method,
-            cfg.lang_model_path, cfg.alpha, cfg.beta, cfg.beam_size,
-            cfg.cutoff_prob, cfg.cutoff_top_n, cfg.num_proc_bsearch)
         #replace the <space> with ' '
         result_transcripts = [
             self._text_featurizer.detokenize(sentence)
@@ -463,6 +463,7 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
         -------
             output_probs(numpy.array): shape[B, T, vocab_size]
             output_lens(numpy.array): shape[B]
+            trans(list(list(str))): shape[B, T]
         """
         output_probs_list = []
         output_lens_list = []
@@ -476,17 +477,18 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
         batch_size, Tmax, x_dim = x_batch.shape
         x_len_batch = audio_len.numpy().astype(np.int64)
         if (Tmax - chunk_size) % chunk_stride != 0:
-            padding_len_batch = chunk_stride - (
-                Tmax - chunk_size
-            ) % chunk_stride  # The length of padding for the batch
+            # The length of padding for the batch
+            padding_len_batch = chunk_stride - (Tmax - chunk_size
+                                                ) % chunk_stride
         else:
             padding_len_batch = 0
         x_list = np.split(x_batch, batch_size, axis=0)
         x_len_list = np.split(x_len_batch, batch_size, axis=0)
 
+        trans_batch = []
         for x, x_len in zip(x_list, x_len_list):
-            # self.autolog.times.start()
-            # self.autolog.times.stamp()
+            if self.args.enable_auto_log is True:
+                self.autolog.times.start()
             x_len = x_len[0]
             assert (chunk_size <= x_len)
 
@@ -504,12 +506,10 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
             num_chunk = int(num_chunk)
 
             chunk_state_h_box = np.zeros(
-                (self.config.model.num_rnn_layers, 1,
-                 self.config.model.rnn_layer_size),
+                (self.config.num_rnn_layers, 1, self.config.rnn_layer_size),
                 dtype=x.dtype)
             chunk_state_c_box = np.zeros(
-                (self.config.model.num_rnn_layers, 1,
-                 self.config.model.rnn_layer_size),
+                (self.config.num_rnn_layers, 1, self.config.rnn_layer_size),
                 dtype=x.dtype)
 
             input_names = self.predictor.get_input_names()
@@ -518,8 +518,14 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
             h_box_handle = self.predictor.get_input_handle(input_names[2])
             c_box_handle = self.predictor.get_input_handle(input_names[3])
 
+            trans = []
             probs_chunk_list = []
             probs_chunk_lens_list = []
+            if self.args.enable_auto_log is True:
+                # record the model preprocessing time
+                self.autolog.times.stamp()
+
+            self.model.decoder.reset_decoder(batch_size=1)
             for i in range(0, num_chunk):
                 start = i * chunk_stride
                 end = start + chunk_size
@@ -528,9 +534,8 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
                     x_chunk_lens = 0
                 else:
                     x_chunk_lens = min(x_len - i * chunk_stride, chunk_size)
-
-                if (x_chunk_lens <
-                        receptive_field_length):  #means the number of input frames in the chunk is not enough for predicting one prob
+                # means the number of input frames in the chunk is not enough for predicting one prob
+                if (x_chunk_lens < receptive_field_length):
                     break
                 x_chunk_lens = np.array([x_chunk_lens])
                 audio_handle.reshape(x_chunk.shape)
@@ -559,9 +564,12 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
                 output_chunk_lens = output_lens_handle.copy_to_cpu()
                 chunk_state_h_box = output_state_h_handle.copy_to_cpu()
                 chunk_state_c_box = output_state_c_handle.copy_to_cpu()
-
+                self.model.decoder.next(output_chunk_probs, output_chunk_lens)
                 probs_chunk_list.append(output_chunk_probs)
                 probs_chunk_lens_list.append(output_chunk_lens)
+                trans_best, trans_beam = self.model.decoder.decode()
+                trans.append(trans_best[0])
+            trans_batch.append(trans)
             output_probs = np.concatenate(probs_chunk_list, axis=1)
             output_lens = np.sum(probs_chunk_lens_list, axis=0)
             vocab_size = output_probs.shape[2]
@@ -575,12 +583,15 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
                 [output_probs, output_probs_padding], axis=1)
             output_probs_list.append(output_probs)
             output_lens_list.append(output_lens)
-            # self.autolog.times.stamp()
-            # self.autolog.times.stamp()
-            # self.autolog.times.end()
+            if self.args.enable_auto_log is True:
+                # record the model inference time
+                self.autolog.times.stamp()
+                # record the post processing time
+                self.autolog.times.stamp()
+                self.autolog.times.end()
         output_probs = np.concatenate(output_probs_list, axis=0)
         output_lens = np.concatenate(output_lens_list, axis=0)
-        return output_probs, output_lens
+        return output_probs, output_lens, trans_batch
 
     def static_forward_offline(self, audio, audio_len):
         """
@@ -607,12 +618,17 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
         audio_len_handle.reshape(x_len.shape)
         audio_len_handle.copy_from_cpu(x_len)
 
-        # self.autolog.times.start()
-        # self.autolog.times.stamp()
+        if self.args.enable_auto_log is True:
+            self.autolog.times.start()
+            # record the prefix processing time
+            self.autolog.times.stamp()
         self.predictor.run()
-        # self.autolog.times.stamp()
-        # self.autolog.times.stamp()
-        # self.autolog.times.end()
+        if self.args.enable_auto_log is True:
+            # record the model inference time
+            self.autolog.times.stamp()
+            # record the post processing time
+            self.autolog.times.stamp()
+            self.autolog.times.end()
 
         output_names = self.predictor.get_output_names()
         output_handle = self.predictor.get_output_handle(output_names[0])
@@ -623,11 +639,11 @@ class DeepSpeech2ExportTester(DeepSpeech2Tester):
 
     def setup_model(self):
         super().setup_model()
-        speedyspeech_config = inference.Config(
+        deepspeech_config = inference.Config(
             self.args.export_path + ".pdmodel",
             self.args.export_path + ".pdiparams")
         if (os.environ['CUDA_VISIBLE_DEVICES'].strip() != ''):
-            speedyspeech_config.enable_use_gpu(100, 0)
-            speedyspeech_config.enable_memory_optim()
-        speedyspeech_predictor = inference.create_predictor(speedyspeech_config)
-        self.predictor = speedyspeech_predictor
+            deepspeech_config.enable_use_gpu(100, 0)
+            deepspeech_config.enable_memory_optim()
+        deepspeech_predictor = inference.create_predictor(deepspeech_config)
+        self.predictor = deepspeech_predictor

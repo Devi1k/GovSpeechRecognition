@@ -94,7 +94,7 @@ class Checkpoint():
         """
         configs = {}
 
-        if checkpoint_path is not None:
+        if checkpoint_path:
             pass
         elif checkpoint_dir is not None and record_file is not None:
             # load checkpint from record file
@@ -114,7 +114,7 @@ class Checkpoint():
         params_path = checkpoint_path + ".pdparams"
         model_dict = paddle.load(params_path)
         model.set_state_dict(model_dict)
-        # logger.info("Rank {}: Restore model from {}".format(rank, params_path))
+        logger.info("Rank {}: Restore model from {}".format(rank, params_path))
 
         optimizer_path = checkpoint_path + ".pdopt"
         if optimizer and os.path.isfile(optimizer_path):

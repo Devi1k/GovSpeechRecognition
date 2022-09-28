@@ -1,4 +1,5 @@
 # Copyright (c) 2021 PaddlePaddle Authors. All Rights Reserved.
+# Copyright 2019 Mobvoi Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,6 +22,7 @@ import paddle
 from paddle import nn
 from paddle.nn import initializer as I
 
+from paddlespeech.s2t.modules.align import Linear
 from paddlespeech.s2t.utils.log import Log
 
 logger = Log(__name__).getlog()
@@ -47,10 +49,10 @@ class MultiHeadedAttention(nn.Layer):
         # We assume d_v always equals d_k
         self.d_k = n_feat // n_head
         self.h = n_head
-        self.linear_q = nn.Linear(n_feat, n_feat)
-        self.linear_k = nn.Linear(n_feat, n_feat)
-        self.linear_v = nn.Linear(n_feat, n_feat)
-        self.linear_out = nn.Linear(n_feat, n_feat)
+        self.linear_q = Linear(n_feat, n_feat)
+        self.linear_k = Linear(n_feat, n_feat)
+        self.linear_v = Linear(n_feat, n_feat)
+        self.linear_out = Linear(n_feat, n_feat)
         self.dropout = nn.Dropout(p=dropout_rate)
 
     def forward_qkv(self,
@@ -94,7 +96,7 @@ class MultiHeadedAttention(nn.Layer):
             mask (paddle.Tensor): Mask, size (#batch, 1, time2) or
                 (#batch, time1, time2).
         Returns:
-            paddle.Tensor: Transformed value weighted 
+            paddle.Tensor: Transformed value weighted
                 by the attention score, (#batch, time1, d_model).
         """
         n_batch = value.shape[0]
@@ -149,7 +151,7 @@ class RelPositionMultiHeadedAttention(MultiHeadedAttention):
         """
         super().__init__(n_head, n_feat, dropout_rate)
         # linear transformation for positional encoding
-        self.linear_pos = nn.Linear(n_feat, n_feat, bias_attr=False)
+        self.linear_pos = Linear(n_feat, n_feat, bias_attr=False)
         # these two learnable bias are used in matrix c and matrix d
         # as described in https://arxiv.org/abs/1901.02860 Section 3.3
         #self.pos_bias_u = nn.Parameter(torch.Tensor(self.h, self.d_k))

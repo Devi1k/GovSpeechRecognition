@@ -14,6 +14,9 @@
 # Modified from espnet(https://github.com/espnet/espnet)
 import librosa
 import numpy as np
+import paddle
+import paddleaudio.compliance.kaldi as kaldi
+from python_speech_features import logfbank
 
 
 def stft(x,
@@ -37,7 +40,7 @@ def stft(x,
     x = np.stack(
         [
             librosa.stft(
-                x[:, ch],
+                y=x[:, ch],
                 n_fft=n_fft,
                 hop_length=n_shift,
                 win_length=win_length,
@@ -66,7 +69,7 @@ def istft(x, n_shift, win_length=None, window="hann", center=True):
     x = np.stack(
         [
             librosa.istft(
-                x[:, ch].T,  # [Time, Freq] -> [Freq, Time]
+                stft_matrix=x[:, ch].T,  # [Time, Freq] -> [Freq, Time]
                 hop_length=n_shift,
                 win_length=win_length,
                 window=window,
@@ -94,7 +97,8 @@ def stft2logmelspectrogram(x_stft,
     # spc: (Time, Channel, Freq) or (Time, Freq)
     spc = np.abs(x_stft)
     # mel_basis: (Mel_freq, Freq)
-    mel_basis = librosa.filters.mel(fs, n_fft, n_mels, fmin, fmax)
+    mel_basis = librosa.filters.mel(
+        sr=fs, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax)
     # lmspc: (Time, Channel, Mel_freq) or (Time, Mel_freq)
     lmspc = np.log10(np.maximum(eps, np.dot(spc, mel_basis.T)))
 
@@ -295,7 +299,7 @@ class IStft():
                     n_shift=self.n_shift,
                     win_length=self.win_length,
                     window=self.window,
-                    center=self.center, ))
+            center=self.center, ))
 
     def __call__(self, x):
         return istft(
@@ -304,3 +308,167 @@ class IStft():
             win_length=self.win_length,
             window=self.window,
             center=self.center, )
+
+
+class LogMelSpectrogramKaldi():
+    def __init__(
+            self,
+            fs=16000,
+            n_mels=80,
+            n_shift=160,  # unit:sample, 10ms
+            win_length=400,  # unit:sample, 25ms
+            energy_floor=0.0,
+            dither=0.1):
+        """
+        The Kaldi implementation of LogMelSpectrogram 
+        Args:
+            fs (int): sample rate of the audio
+            n_mels (int): number of mel filter banks
+            n_shift (int): number of points in a frame shift
+            win_length (int): number of points in a frame windows
+            energy_floor (float): Floor on energy in Spectrogram computation (absolute)
+            dither (float): Dithering constant
+
+        Returns:
+            LogMelSpectrogramKaldi
+        """
+
+        self.fs = fs
+        self.n_mels = n_mels
+        num_point_ms = fs / 1000
+        self.n_frame_length = win_length / num_point_ms
+        self.n_frame_shift = n_shift / num_point_ms
+        self.energy_floor = energy_floor
+        self.dither = dither
+
+    def __repr__(self):
+        return (
+            "{name}(fs={fs}, n_mels={n_mels}, "
+            "n_frame_shift={n_frame_shift}, n_frame_length={n_frame_length}, "
+            "dither={dither}))".format(
+                name=self.__class__.__name__,
+                fs=self.fs,
+                n_mels=self.n_mels,
+                n_frame_shift=self.n_frame_shift,
+                n_frame_length=self.n_frame_length,
+                dither=self.dither, ))
+
+    def __call__(self, x, train):
+        """
+        Args:
+            x (np.ndarray): shape (Ti,)
+            train (bool): True, train mode.
+
+        Raises:
+            ValueError: not support (Ti, C)
+
+        Returns:
+            np.ndarray: (T, D)
+        """
+        dither = self.dither if train else 0.0
+        if x.ndim != 1:
+            raise ValueError("Not support x: [Time, Channel]")
+        waveform = paddle.to_tensor(np.expand_dims(x, 0), dtype=paddle.float32)
+        mat = kaldi.fbank(
+            waveform,
+            n_mels=self.n_mels,
+            frame_length=self.n_frame_length,
+            frame_shift=self.n_frame_shift,
+            dither=dither,
+            energy_floor=self.energy_floor,
+            sr=self.fs)
+        mat = np.squeeze(mat.numpy())
+        return mat
+
+
+class LogMelSpectrogramKaldi_decay():
+    def __init__(
+            self,
+            fs=16000,
+            n_mels=80,
+            n_fft=512,  # fft point
+            n_shift=160,  # unit:sample, 10ms
+            win_length=400,  # unit:sample, 25ms
+            window="povey",
+            fmin=20,
+            fmax=None,
+            eps=1e-10,
+            dither=1.0):
+        self.fs = fs
+        self.n_mels = n_mels
+        self.n_fft = n_fft
+        if n_shift > win_length:
+            raise ValueError("Stride size must not be greater than "
+                             "window size.")
+        self.n_shift = n_shift / fs  # unit: ms
+        self.win_length = win_length / fs  # unit: ms
+
+        self.window = window
+        self.fmin = fmin
+        if fmax is None:
+            fmax_ = fmax if fmax else self.fs / 2
+        elif fmax > int(self.fs / 2):
+            raise ValueError("fmax must not be greater than half of "
+                             "sample rate.")
+        self.fmax = fmax_
+
+        self.eps = eps
+        self.remove_dc_offset = True
+        self.preemph = 0.97
+        self.dither = dither  # only work in train mode
+
+    def __repr__(self):
+        return (
+            "{name}(fs={fs}, n_mels={n_mels}, n_fft={n_fft}, "
+            "n_shift={n_shift}, win_length={win_length}, preemph={preemph}, window={window}, "
+            "fmin={fmin}, fmax={fmax}, eps={eps}, dither={dither}))".format(
+                name=self.__class__.__name__,
+                fs=self.fs,
+                n_mels=self.n_mels,
+                n_fft=self.n_fft,
+                n_shift=self.n_shift,
+                preemph=self.preemph,
+                win_length=self.win_length,
+                window=self.window,
+                fmin=self.fmin,
+                fmax=self.fmax,
+                eps=self.eps,
+                dither=self.dither, ))
+
+    def __call__(self, x, train):
+        """
+
+        Args:
+            x (np.ndarray): shape (Ti,)
+            train (bool): True, train mode.
+
+        Raises:
+            ValueError: not support (Ti, C)
+
+        Returns:
+            np.ndarray: (T, D)
+        """
+        dither = self.dither if train else 0.0
+        if x.ndim != 1:
+            raise ValueError("Not support x: [Time, Channel]")
+
+        if x.dtype in np.sctypes['float']:
+            # PCM32 -> PCM16
+            bits = np.iinfo(np.int16).bits
+            x = x * 2 ** (bits - 1)
+
+        # logfbank need PCM16 input
+        y = logfbank(
+            signal=x,
+            samplerate=self.fs,
+            winlen=self.win_length,  # unit ms
+            winstep=self.n_shift,  # unit ms
+            nfilt=self.n_mels,
+            nfft=self.n_fft,
+            lowfreq=self.fmin,
+            highfreq=self.fmax,
+            dither=dither,
+            remove_dc_offset=self.remove_dc_offset,
+            preemph=self.preemph,
+            wintype=self.window)
+        return y

@@ -12,23 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Reference espnet Apache 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+# Modified from espnet(https://github.com/espnet/espnet)
 """V2 backend for `asr_recog.py` using py:class:`decoders.beam_search.BeamSearch`."""
 import jsonlines
 import paddle
 from yacs.config import CfgNode
 
-from .beam_search import BatchBeamSearch
-from .beam_search import BeamSearch
-from .scorers.length_bonus import LengthBonus
-from .scorers.scorer_interface import BatchScorerInterface
-from .utils import add_results_to_json
 from paddlespeech.s2t.exps import dynamic_import_tester
 from paddlespeech.s2t.io.reader import LoadInputsAndTargets
 from paddlespeech.s2t.models.asr_interface import ASRInterface
 from paddlespeech.s2t.models.lm_interface import dynamic_import_lm
 from paddlespeech.s2t.utils.log import Log
+from .beam_search import BatchBeamSearch
+from .beam_search import BeamSearch
+from .scorers.length_bonus import LengthBonus
+from .scorers.scorer_interface import BatchScorerInterface
+from .utils import add_results_to_json
 
 logger = Log(__name__).getlog()
+
 
 # NOTE: you need this func to generate our sphinx doc
 
@@ -40,7 +42,6 @@ def get_config(config_path):
 
 
 def load_trained_model(args):
-    args.nprocs = args.ngpu
     confs = get_config(args.model_conf)
     class_obj = dynamic_import_tester(args.model_name)
     exp = class_obj(confs, args)
@@ -86,7 +87,7 @@ def recog_v2(args):
         mode="asr",
         load_output=False,
         sort_in_input_length=False,
-        preprocess_conf=confs.collator.augmentation_config
+        preprocess_conf=confs.preprocess_config
         if args.preprocess_conf is None else args.preprocess_conf,
         preprocess_args={"train": False}, )
 

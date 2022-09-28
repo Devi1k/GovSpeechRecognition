@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified from wenet(https://github.com/wenet-e2e/wenet)
 """U2 ASR Model
 Unified Streaming and Non-streaming Two-pass End-to-end Model for Speech Recognition
 (https://arxiv.org/pdf/2012.05481.pdf)
@@ -26,17 +27,17 @@ from typing import Tuple
 import paddle
 from paddle import jit
 from paddle import nn
-from yacs.config import CfgNode
 
 from paddlespeech.s2t.decoders.scorers.ctc import CTCPrefixScorer
 from paddlespeech.s2t.frontend.utility import IGNORE_ID
 from paddlespeech.s2t.frontend.utility import load_cmvn
 from paddlespeech.s2t.models.asr_interface import ASRInterface
 from paddlespeech.s2t.modules.cmvn import GlobalCMVN
-from paddlespeech.s2t.modules.ctc import CTCDecoder
+from paddlespeech.s2t.modules.ctc import CTCDecoderBase
 from paddlespeech.s2t.modules.decoder import TransformerDecoder
 from paddlespeech.s2t.modules.encoder import ConformerEncoder
 from paddlespeech.s2t.modules.encoder import TransformerEncoder
+from paddlespeech.s2t.modules.initializer import DefaultInitializerContext
 from paddlespeech.s2t.modules.loss import LabelSmoothingLoss
 from paddlespeech.s2t.modules.mask import make_pad_mask
 from paddlespeech.s2t.modules.mask import mask_finished_preds
@@ -49,8 +50,8 @@ from paddlespeech.s2t.utils.log import Log
 from paddlespeech.s2t.utils.tensor_utils import add_sos_eos
 from paddlespeech.s2t.utils.tensor_utils import pad_sequence
 from paddlespeech.s2t.utils.tensor_utils import th_accuracy
-from paddlespeech.s2t.utils.utility import log_add
 from paddlespeech.s2t.utils.utility import UpdateConfig
+from paddlespeech.s2t.utils.utility import log_add
 
 __all__ = ["U2Model", "U2InferModel"]
 
@@ -60,69 +61,20 @@ logger = Log(__name__).getlog()
 class U2BaseModel(ASRInterface, nn.Layer):
     """CTC-Attention hybrid Encoder-Decoder model"""
 
-    @classmethod
-    def params(cls, config: Optional[CfgNode]=None) -> CfgNode:
-        # network architecture
-        default = CfgNode()
-        # allow add new item when merge_with_file
-        default.cmvn_file = ""
-        default.cmvn_file_type = "json"
-        default.input_dim = 0
-        default.output_dim = 0
-        # encoder related
-        default.encoder = 'transformer'
-        default.encoder_conf = CfgNode(
-            dict(
-                output_size=256,  # dimension of attention
-                attention_heads=4,
-                linear_units=2048,  # the number of units of position-wise feed forward
-                num_blocks=12,  # the number of encoder blocks
-                dropout_rate=0.1,
-                positional_dropout_rate=0.1,
-                attention_dropout_rate=0.0,
-                input_layer='conv2d',  # encoder input type, you can chose conv2d, conv2d6 and conv2d8
-                normalize_before=True,
-                # use_cnn_module=True,
-                # cnn_module_kernel=15,
-                # activation_type='swish',
-                # pos_enc_layer_type='rel_pos',
-                # selfattention_layer_type='rel_selfattn',
-            ))
-        # decoder related
-        default.decoder = 'transformer'
-        default.decoder_conf = CfgNode(
-            dict(
-                attention_heads=4,
-                linear_units=2048,
-                num_blocks=6,
-                dropout_rate=0.1,
-                positional_dropout_rate=0.1,
-                self_attention_dropout_rate=0.0,
-                src_attention_dropout_rate=0.0, ))
-        # hybrid CTC/attention
-        default.model_conf = CfgNode(
-            dict(
-                ctc_weight=0.3,
-                lsm_weight=0.1,  # label smoothing option
-                length_normalized_loss=False, ))
-
-        if config is not None:
-            config.merge_from_other_cfg(default)
-        return default
-
     def __init__(self,
                  vocab_size: int,
                  encoder: TransformerEncoder,
                  decoder: TransformerDecoder,
-                 ctc: CTCDecoder,
-                 ctc_weight: float=0.5,
-                 ignore_id: int=IGNORE_ID,
-                 lsm_weight: float=0.0,
-                 length_normalized_loss: bool=False,
+                 ctc: CTCDecoderBase,
+                 ctc_weight: float = 0.5,
+                 ignore_id: int = IGNORE_ID,
+                 lsm_weight: float = 0.0,
+                 length_normalized_loss: bool = False,
                  **kwargs):
         assert 0.0 <= ctc_weight <= 1.0, ctc_weight
 
         nn.Layer.__init__(self)
+
         # note that eos is the same as sos (equivalent ID)
         self.sos = vocab_size - 1
         self.eos = vocab_size - 1
@@ -579,10 +531,16 @@ class U2BaseModel(ASRInterface, nn.Layer):
             num_decoding_left_chunks, simulate_streaming)
         assert len(hyps) == beam_size
 
-        hyps_pad = pad_sequence([
-            paddle.to_tensor(hyp[0], place=device, dtype=paddle.long)
-            for hyp in hyps
-        ], True, self.ignore_id)  # (beam_size, max_hyps_len)
+        hyp_list = []
+        for hyp in hyps:
+            hyp_content = hyp[0]
+            # Prevent the hyp is empty
+            if len(hyp_content) == 0:
+                hyp_content = (self.ctc.blank_id,)
+            hyp_content = paddle.to_tensor(
+                hyp_content, place=device, dtype=paddle.long)
+            hyp_list.append(hyp_content)
+        hyps_pad = pad_sequence(hyp_list, True, self.ignore_id)
         hyps_lens = paddle.to_tensor(
             [len(hyp[0]) for hyp in hyps], place=device,
             dtype=paddle.long)  # (beam_size,)
@@ -708,7 +666,7 @@ class U2BaseModel(ASRInterface, nn.Layer):
         # (num_hyps, max_hyps_len, vocab_size)
         decoder_out, _ = self.decoder(encoder_out, encoder_mask, hyps,
                                       hyps_lens)
-        decoder_out = paddle.nn.functional.log_softmax(decoder_out, dim=-1)
+        decoder_out = paddle.nn.functional.log_softmax(decoder_out, axis=-1)
         return decoder_out
 
     @paddle.no_grad()
@@ -717,13 +675,7 @@ class U2BaseModel(ASRInterface, nn.Layer):
                feats_lengths: paddle.Tensor,
                text_feature: Dict[str, int],
                decoding_method: str,
-               lang_model_path: str,
-               beam_alpha: float,
-               beam_beta: float,
                beam_size: int,
-               cutoff_prob: float,
-               cutoff_top_n: int,
-               num_processes: int,
                ctc_weight: float=0.0,
                decoding_chunk_size: int=-1,
                num_decoding_left_chunks: int=-1,
@@ -731,19 +683,13 @@ class U2BaseModel(ASRInterface, nn.Layer):
         """u2 decoding.
 
         Args:
-            feats (Tenosr): audio features, (B, T, D)
-            feats_lengths (Tenosr): (B)
+            feats (Tensor): audio features, (B, T, D)
+            feats_lengths (Tensor): (B)
             text_feature (TextFeaturizer): text feature object.
             decoding_method (str): decoding mode, e.g.
                     'attention', 'ctc_greedy_search',
                     'ctc_prefix_beam_search', 'attention_rescoring'
-            lang_model_path (str): lm path.
-            beam_alpha (float): lm weight.
-            beam_beta (float): length penalty.
             beam_size (int): beam size for search
-            cutoff_prob (float): for prune.
-            cutoff_top_n (int): for prune.
-            num_processes (int):
             ctc_weight (float, optional): ctc weight for attention rescoring decode mode. Defaults to 0.0.
             decoding_chunk_size (int, optional): decoding chunk size. Defaults to -1.
                     <0: for decoding, use full chunk.
@@ -837,14 +783,18 @@ class U2DecodeModel(U2BaseModel):
 
 class U2Model(U2DecodeModel):
     def __init__(self, configs: dict):
-        vocab_size, encoder, decoder, ctc = U2Model._init_from_config(configs)
+        model_conf = configs.get('model_conf', dict())
+        init_type = model_conf.get("init_type", None)
+        with DefaultInitializerContext(init_type):
+            vocab_size, encoder, decoder, ctc = U2Model._init_from_config(
+                configs)
 
         super().__init__(
             vocab_size=vocab_size,
             encoder=encoder,
             decoder=decoder,
             ctc=ctc,
-            **configs['model_conf'])
+            **model_conf)
 
     @classmethod
     def _init_from_config(cls, configs: dict):
@@ -860,7 +810,7 @@ class U2Model(U2DecodeModel):
             int, nn.Layer, nn.Layer, nn.Layer: vocab size, encoder, decoder, ctc
         """
         # cmvn
-        if configs['cmvn_file'] is not None:
+        if 'cmvn_file' in configs and configs['cmvn_file']:
             mean, istd = load_cmvn(configs['cmvn_file'],
                                    configs['cmvn_file_type'])
             global_cmvn = GlobalCMVN(
@@ -893,15 +843,17 @@ class U2Model(U2DecodeModel):
                                      **configs['decoder_conf'])
 
         # ctc decoder and ctc loss
-        model_conf = configs['model_conf']
-        ctc = CTCDecoder(
+        model_conf = configs.get('model_conf', dict())
+        dropout_rate = model_conf.get('ctc_dropout_rate', 0.0)
+        grad_norm_type = model_conf.get('ctc_grad_norm_type', None)
+        ctc = CTCDecoderBase(
             odim=vocab_size,
             enc_n_units=encoder.output_size(),
             blank_id=0,
-            dropout_rate=model_conf['ctc_dropoutrate'],
+            dropout_rate=dropout_rate,
             reduction=True,  # sum
             batch_average=True,  # sum / batch_size
-            grad_norm_type=model_conf['ctc_grad_norm_type'])
+            grad_norm_type=grad_norm_type)
 
         return vocab_size, encoder, decoder, ctc
 
@@ -934,8 +886,8 @@ class U2Model(U2DecodeModel):
             DeepSpeech2Model: The model built from pretrained result.
         """
         with UpdateConfig(config):
-            config.input_dim = dataloader.collate_fn.feature_size
-            config.output_dim = dataloader.collate_fn.vocab_size
+            config.input_dim = dataloader.feat_dim
+            config.output_dim = dataloader.vocab_size
 
         model = cls.from_config(config)
 

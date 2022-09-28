@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Evaluation for DeepSpeech2 model."""
-from paddlespeech.s2t.exps.deepspeech2.config import get_cfg_defaults
+from yacs.config import CfgNode
+
 from paddlespeech.s2t.exps.deepspeech2.model import DeepSpeech2ExportTester as ExportTester
 from paddlespeech.s2t.training.cli import default_argument_parser
 from paddlespeech.s2t.utils.utility import print_arguments
@@ -34,19 +35,25 @@ if __name__ == "__main__":
     # save asr result to
     parser.add_argument(
         "--result_file", type=str, help="path of save the asr result")
-    #load jit model from
+    # load jit model from
     parser.add_argument(
         "--export_path", type=str, help="path of the jit model to save")
     parser.add_argument(
         "--model_type", type=str, default='offline', help='offline/online')
+    parser.add_argument(
+        "--enable-auto-log", action="store_true", help="use auto log")
     args = parser.parse_args()
     print_arguments(args, globals())
     print("model_type:{}".format(args.model_type))
 
     # https://yaml.org/type/float.html
-    config = get_cfg_defaults(args.model_type)
+    config = CfgNode(new_allowed=True)
     if args.config:
         config.merge_from_file(args.config)
+    if args.decode_cfg:
+        decode_confs = CfgNode(new_allowed=True)
+        decode_confs.merge_from_file(args.decode_cfg)
+        config.decode = decode_confs
     if args.opts:
         config.merge_from_list(args.opts)
     config.freeze()

@@ -1,4 +1,5 @@
 # Copyright (c) 2021 PaddlePaddle Authors. All Rights Reserved.
+# Copyright 2019 Mobvoi Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +20,8 @@ from typing import Tuple
 import paddle
 from paddle import nn
 
+from paddlespeech.s2t.modules.align import LayerNorm
+from paddlespeech.s2t.modules.align import Linear
 from paddlespeech.s2t.utils.log import Log
 
 logger = Log(__name__).getlog()
@@ -61,14 +64,14 @@ class DecoderLayer(nn.Layer):
         self.self_attn = self_attn
         self.src_attn = src_attn
         self.feed_forward = feed_forward
-        self.norm1 = nn.LayerNorm(size, epsilon=1e-12)
-        self.norm2 = nn.LayerNorm(size, epsilon=1e-12)
-        self.norm3 = nn.LayerNorm(size, epsilon=1e-12)
+        self.norm1 = LayerNorm(size, epsilon=1e-12)
+        self.norm2 = LayerNorm(size, epsilon=1e-12)
+        self.norm3 = LayerNorm(size, epsilon=1e-12)
         self.dropout = nn.Dropout(dropout_rate)
         self.normalize_before = normalize_before
         self.concat_after = concat_after
-        self.concat_linear1 = nn.Linear(size + size, size)
-        self.concat_linear2 = nn.Linear(size + size, size)
+        self.concat_linear1 = Linear(size + size, size)
+        self.concat_linear2 = Linear(size + size, size)
 
     def forward(
             self,

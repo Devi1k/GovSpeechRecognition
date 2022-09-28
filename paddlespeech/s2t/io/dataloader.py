@@ -16,10 +16,12 @@ from typing import Dict
 from typing import List
 from typing import Text
 
+import jsonlines
 import numpy as np
+from paddle.io import BatchSampler
 from paddle.io import DataLoader
+from paddle.io import DistributedBatchSampler
 
-from paddlespeech.s2t.frontend.utility import read_manifest
 from paddlespeech.s2t.io.batchfy import make_batchset
 from paddlespeech.s2t.io.converter import CustomConverter
 from paddlespeech.s2t.io.dataset import TransformDataset
@@ -59,21 +61,25 @@ class BatchDataLoader():
     def __init__(self,
                  json_file: str,
                  train_mode: bool,
-                 sortagrad: bool=False,
-                 batch_size: int=0,
-                 maxlen_in: float=float('inf'),
-                 maxlen_out: float=float('inf'),
-                 minibatches: int=0,
-                 mini_batch_size: int=1,
-                 batch_count: str='auto',
-                 batch_bins: int=0,
-                 batch_frames_in: int=0,
-                 batch_frames_out: int=0,
-                 batch_frames_inout: int=0,
+                 sortagrad: int = 0,
+                 batch_size: int = 0,
+                 maxlen_in: float = float('inf'),
+                 maxlen_out: float = float('inf'),
+                 minibatches: int = 0,
+                 mini_batch_size: int = 1,
+                 batch_count: str = 'auto',
+                 batch_bins: int = 0,
+                 batch_frames_in: int = 0,
+                 batch_frames_out: int = 0,
+                 batch_frames_inout: int = 0,
                  preprocess_conf=None,
-                 n_iter_processes: int=1,
-                 subsampling_factor: int=1,
-                 num_encs: int=1):
+                 n_iter_processes: int = 1,
+                 subsampling_factor: int = 1,
+                 load_aux_input: bool = False,
+                 load_aux_output: bool = False,
+                 num_encs: int = 1,
+                 dist_sampler: bool = False,
+                 shortest_first: bool = False):
         self.json_file = json_file
         self.train_mode = train_mode
         self.use_sortagrad = sortagrad == -1 or sortagrad > 0
@@ -89,9 +95,15 @@ class BatchDataLoader():
         self.num_encs = num_encs
         self.preprocess_conf = preprocess_conf
         self.n_iter_processes = n_iter_processes
+        self.load_aux_input = load_aux_input
+        self.load_aux_output = load_aux_output
+        self.dist_sampler = dist_sampler
+        self.shortest_first = shortest_first
 
         # read json data
-        self.data_json = read_manifest(json_file)
+        with jsonlines.open(json_file, 'r') as reader:
+            self.data_json = list(reader)
+
         self.feat_dim, self.vocab_size = feat_dim_and_vocab_size(
             self.data_json, mode='asr')
 
@@ -103,7 +115,7 @@ class BatchDataLoader():
             maxlen_out,
             minibatches,  # for debug
             min_batch_size=mini_batch_size,
-            shortest_first=self.use_sortagrad,
+            shortest_first=self.shortest_first or self.use_sortagrad,
             count=batch_count,
             batch_bins=batch_bins,
             batch_frames_in=batch_frames_in,
@@ -124,21 +136,36 @@ class BatchDataLoader():
         # Setup a converter
         if num_encs == 1:
             self.converter = CustomConverter(
-                subsampling_factor=subsampling_factor, dtype=np.float32)
+                subsampling_factor=subsampling_factor,
+                dtype=np.float32,
+                load_aux_input=load_aux_input,
+                load_aux_output=load_aux_output)
         else:
             assert NotImplementedError("not impl CustomConverterMulEnc.")
 
         # hack to make batchsize argument as 1
         # actual bathsize is included in a list
-        # default collate function converts numpy array to pytorch tensor
+        # default collate function converts numpy array to paddle tensor
         # we used an empty collate function instead which returns list
         self.dataset = TransformDataset(self.minibaches, self.converter,
                                         self.reader)
 
+        if self.dist_sampler:
+            self.batch_sampler = DistributedBatchSampler(
+                dataset=self.dataset,
+                batch_size=1,
+                shuffle=not self.use_sortagrad if self.train_mode else False,
+                drop_last=False, )
+        else:
+            self.batch_sampler = BatchSampler(
+                dataset=self.dataset,
+                batch_size=1,
+                shuffle=not self.use_sortagrad if self.train_mode else False,
+                drop_last=False, )
+
         self.dataloader = DataLoader(
             dataset=self.dataset,
-            batch_size=1,
-            shuffle=not self.use_sortagrad if self.train_mode else False,
+            batch_sampler=self.batch_sampler,
             collate_fn=batch_collate,
             num_workers=self.n_iter_processes, )
 
@@ -166,5 +193,9 @@ class BatchDataLoader():
         echo += f"subsampling_factor: {self.subsampling_factor}, "
         echo += f"num_encs: {self.num_encs}, "
         echo += f"num_workers: {self.n_iter_processes}, "
+        echo += f"load_aux_input: {self.load_aux_input}, "
+        echo += f"load_aux_output: {self.load_aux_output}, "
+        echo += f"dist_sampler: {self.dist_sampler}, "
+        echo += f"shortest_first: {self.shortest_first}, "
         echo += f"file: {self.json_file}"
         return echo

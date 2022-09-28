@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
 import os
 import random
 import socket
@@ -22,7 +21,7 @@ import wave
 from time import gmtime
 from time import strftime
 
-from paddlespeech.s2t.frontend.utility import read_manifest
+import jsonlines
 
 __all__ = ["socket_send", "warm_up_test", "AsrTCPServer", "AsrRequestHandler"]
 
@@ -45,7 +44,8 @@ def warm_up_test(audio_process_handler,
                  num_test_cases,
                  random_seed=0):
     """Warming-up test."""
-    manifest = read_manifest(manifest_path)
+    with jsonlines.open(manifest_path) as reader:
+        manifest = list(reader)
     rng = random.Random(random_seed)
     samples = rng.sample(manifest, num_test_cases)
     for idx, sample in enumerate(samples):
@@ -75,49 +75,17 @@ class AsrTCPServer(socketserver.TCPServer):
 class AsrRequestHandler(socketserver.BaseRequestHandler):
     """The ASR request handler."""
 
-    def _write_to_file(self, data):
-        # prepare save dir and filename
-        # print(self.server.speech_save_dir)
-        if not os.path.exists(self.server.speech_save_dir):
-            os.mkdir(self.server.speech_save_dir)
-        timestamp = strftime("%Y%m%d%H%M%S", gmtime())
-        out_filename = os.path.join(
-            self.server.speech_save_dir,
-            timestamp + "_" + self.client_address[0] + ".wav")
-        # write to wav file
-        file = wave.open(out_filename, 'wb')
-        file.setnchannels(2)
-        file.setsampwidth(2)
-        file.setframerate(16000)
-        file.writeframes(data)
-        file.close()
-        print('write successfully')
-        return out_filename
-
     def handle(self):
         # receive data through TCP socket
         chunk = self.request.recv(1024)
-        print(chunk)
-        # print(struct.unpack('>i', chunk[:4]))
-        info = chunk[:251].decode('UTF-8')
-        target_len = int(info[-8:-2])
-        # target_len = struct.unpack('>i', chunk[:4])[0]
-        # target_len = 639552
+        target_len = struct.unpack('>i', chunk[:4])[0]
         data = chunk[4:]
-        # print(data)
-        print('target_len %s' % target_len)
         while len(data) < target_len:
-            # print('reading')
-            # print('recv接收的长度是:', len(chunk))
             chunk = self.request.recv(1024)
-            # print(chunk)
             data += chunk
-
-
         # write to file
-        print(len(data))
         filename = self._write_to_file(data)
-        # print('filename %s' % filename)
+
         print("Received utterance[length=%d] from %s, saved to %s." %
               (len(data), self.client_address[0], filename))
         start_time = time.time()
@@ -126,3 +94,20 @@ class AsrRequestHandler(socketserver.BaseRequestHandler):
         print("Response Time: %f, Transcript: %s" %
               (finish_time - start_time, transcript))
         self.request.sendall(transcript.encode('utf-8'))
+
+    def _write_to_file(self, data):
+        # prepare save dir and filename
+        if not os.path.exists(self.server.speech_save_dir):
+            os.mkdir(self.server.speech_save_dir)
+        timestamp = strftime("%Y%m%d%H%M%S", gmtime())
+        out_filename = os.path.join(
+            self.server.speech_save_dir,
+            timestamp + "_" + self.client_address[0] + ".wav")
+        # write to wav file
+        file = wave.open(out_filename, 'wb')
+        file.setnchannels(1)
+        file.setsampwidth(2)
+        file.setframerate(16000)
+        file.writeframes(data)
+        file.close()
+        return out_filename

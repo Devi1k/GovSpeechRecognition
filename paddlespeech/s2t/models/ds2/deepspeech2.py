@@ -12,18 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Deepspeech2 ASR Model"""
-from typing import Optional
-
 import paddle
 from paddle import nn
-from yacs.config import CfgNode
 
 from paddlespeech.s2t.models.ds2.conv import ConvStack
 from paddlespeech.s2t.models.ds2.rnn import RNNStack
 from paddlespeech.s2t.modules.ctc import CTCDecoder
+from paddlespeech.s2t.utils import layer_tools
 from paddlespeech.s2t.utils.checkpoint import Checkpoint
+from paddlespeech.s2t.utils.log import Log
 
-# logger = Log(__name__).getlog()
+logger = Log(__name__).getlog()
 
 __all__ = ['DeepSpeech2Model', 'DeepSpeech2InferModel']
 
@@ -118,20 +117,6 @@ class DeepSpeech2Model(nn.Layer):
     :rtype: tuple of LayerOutput
     """
 
-    @classmethod
-    def params(cls, config: Optional[CfgNode]=None) -> CfgNode:
-        default = CfgNode(
-            dict(
-                num_conv_layers=2,  #Number of stacking convolution layers.
-                num_rnn_layers=3,  #Number of stacking RNN layers.
-                rnn_layer_size=1024,  #RNN layer size (number of RNN cells).
-                use_gru=True,  #Use gru if set True. Use simple rnn if set False.
-                share_rnn_weights=True,  #Whether to share input-hidden weights between forward and backward directional RNNs.Notice that for GRU, weight sharing is not supported.
-                ctc_grad_norm_type='instance', ))
-        if config is not None:
-            config.merge_from_other_cfg(default)
-        return default
-
     def __init__(self,
                  feat_size,
                  dict_size,
@@ -141,7 +126,7 @@ class DeepSpeech2Model(nn.Layer):
                  use_gru=False,
                  share_rnn_weights=True,
                  blank_id=0,
-                 ctc_grad_norm_type='instance'):
+                 ctc_grad_norm_type=None):
         super().__init__()
         self.encoder = CRNNEncoder(
             feat_size=feat_size,
@@ -166,37 +151,31 @@ class DeepSpeech2Model(nn.Layer):
         """Compute Model loss
 
         Args:
-            audio (Tenosr): [B, T, D]
+            audio (Tensors): [B, T, D]
             audio_len (Tensor): [B]
             text (Tensor): [B, U]
             text_len (Tensor): [B]
 
         Returns:
-            loss (Tenosr): [1]
+            loss (Tensor): [1]
         """
         eouts, eouts_len = self.encoder(audio, audio_len)
         loss = self.decoder(eouts, eouts_len, text, text_len)
         return loss
 
     @paddle.no_grad()
-    def decode(self, audio, audio_len, vocab_list, decoding_method,
-               lang_model_path, beam_alpha, beam_beta, beam_size, cutoff_prob,
-               cutoff_top_n, num_processes):
-        # init once
+    def decode(self, audio, audio_len):
         # decoders only accept string encoded in utf-8
-        self.decoder.init_decode(
-            beam_alpha=beam_alpha,
-            beam_beta=beam_beta,
-            lang_model_path=lang_model_path,
-            vocab_list=vocab_list,
-            decoding_method=decoding_method)
 
+        # Make sure the decoder has been initialized
         eouts, eouts_len = self.encoder(audio, audio_len)
         probs = self.decoder.softmax(eouts)
-        return self.decoder.decode_probs(
-            probs.numpy(), eouts_len, vocab_list, decoding_method,
-            lang_model_path, beam_alpha, beam_beta, beam_size, cutoff_prob,
-            cutoff_top_n, num_processes)
+        batch_size = probs.shape[0]
+        self.decoder.reset_decoder(batch_size=batch_size)
+        self.decoder.next(probs, eouts_len)
+        trans_best, trans_beam = self.decoder.decode()
+
+        return trans_best
 
     @classmethod
     def from_pretrained(cls, dataloader, config, checkpoint_path):
@@ -218,20 +197,18 @@ class DeepSpeech2Model(nn.Layer):
         """
         model = cls(
             feat_size=dataloader.collate_fn.feature_size,
-            # feat_size=dataloader.dataset.feature_size,
             dict_size=dataloader.collate_fn.vocab_size,
-            # dict_size=dataloader.dataset.vocab_size,
-            num_conv_layers=config.model.num_conv_layers,
-            num_rnn_layers=config.model.num_rnn_layers,
-            rnn_size=config.model.rnn_layer_size,
-            use_gru=config.model.use_gru,
-            share_rnn_weights=config.model.share_rnn_weights,
-            blank_id=config.model.blank_id,
-            ctc_grad_norm_type=config.model.ctc_grad_norm_type, )
+            num_conv_layers=config.num_conv_layers,
+            num_rnn_layers=config.num_rnn_layers,
+            rnn_size=config.rnn_layer_size,
+            use_gru=config.use_gru,
+            share_rnn_weights=config.share_rnn_weights,
+            blank_id=config.blank_id,
+            ctc_grad_norm_type=config.get('ctc_grad_norm_type', None), )
         infos = Checkpoint().load_parameters(
             model, checkpoint_path=checkpoint_path)
-        # logger.info(f"checkpoint info: {infos}")
-        # layer_tools.summary(model)
+        logger.info(f"checkpoint info: {infos}")
+        layer_tools.summary(model)
         return model
 
     @classmethod
@@ -240,22 +217,22 @@ class DeepSpeech2Model(nn.Layer):
         Parameters
 
         config: yacs.config.CfgNode
-            config.model
+            config
         Returns
         -------
         DeepSpeech2Model
             The model built from config.
         """
         model = cls(
-            feat_size=config.feat_size,
-            dict_size=config.dict_size,
+            feat_size=config.input_dim,
+            dict_size=config.output_dim,
             num_conv_layers=config.num_conv_layers,
             num_rnn_layers=config.num_rnn_layers,
             rnn_size=config.rnn_layer_size,
             use_gru=config.use_gru,
             share_rnn_weights=config.share_rnn_weights,
             blank_id=config.blank_id,
-            ctc_grad_norm_type=config.ctc_grad_norm_type, )
+            ctc_grad_norm_type=config.get('ctc_grad_norm_type', None), )
         return model
 
 

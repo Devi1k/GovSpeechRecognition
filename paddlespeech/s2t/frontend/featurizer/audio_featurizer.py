@@ -354,10 +354,10 @@ class AudioFeaturizer():
             nfft=512,
             lowfreq=20,
             highfreq=max_freq,
-
-
+            dither=dither,
+            remove_dc_offset=True,
             preemph=0.97,
-            )
+            wintype='povey')
         if delta_delta:
             fbank_feat = self._concat_delta_delta(fbank_feat)
         return fbank_feat

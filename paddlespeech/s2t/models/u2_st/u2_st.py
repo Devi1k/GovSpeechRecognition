@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Modified from wenet(https://github.com/wenet-e2e/wenet)
 """U2 ASR Model
-Unified Streaming and Non-streaming Two-pass End-to-end Model for Speech Recognition 
+Unified Streaming and Non-streaming Two-pass End-to-end Model for Speech Recognition
 (https://arxiv.org/pdf/2012.05481.pdf)
 """
 import time
@@ -24,18 +25,15 @@ from typing import Tuple
 import paddle
 from paddle import jit
 from paddle import nn
-from yacs.config import CfgNode
 
 from paddlespeech.s2t.frontend.utility import IGNORE_ID
 from paddlespeech.s2t.frontend.utility import load_cmvn
 from paddlespeech.s2t.modules.cmvn import GlobalCMVN
-from paddlespeech.s2t.modules.ctc import CTCDecoder
+from paddlespeech.s2t.modules.ctc import CTCDecoderBase
 from paddlespeech.s2t.modules.decoder import TransformerDecoder
 from paddlespeech.s2t.modules.encoder import ConformerEncoder
 from paddlespeech.s2t.modules.encoder import TransformerEncoder
 from paddlespeech.s2t.modules.loss import LabelSmoothingLoss
-from paddlespeech.s2t.modules.mask import mask_finished_preds
-from paddlespeech.s2t.modules.mask import mask_finished_scores
 from paddlespeech.s2t.modules.mask import subsequent_mask
 from paddlespeech.s2t.utils import checkpoint
 from paddlespeech.s2t.utils import layer_tools
@@ -52,68 +50,17 @@ logger = Log(__name__).getlog()
 class U2STBaseModel(nn.Layer):
     """CTC-Attention hybrid Encoder-Decoder model"""
 
-    @classmethod
-    def params(cls, config: Optional[CfgNode]=None) -> CfgNode:
-        # network architecture
-        default = CfgNode()
-        # allow add new item when merge_with_file
-        default.cmvn_file = ""
-        default.cmvn_file_type = "json"
-        default.input_dim = 0
-        default.output_dim = 0
-        # encoder related
-        default.encoder = 'transformer'
-        default.encoder_conf = CfgNode(
-            dict(
-                output_size=256,  # dimension of attention
-                attention_heads=4,
-                linear_units=2048,  # the number of units of position-wise feed forward
-                num_blocks=12,  # the number of encoder blocks
-                dropout_rate=0.1,
-                positional_dropout_rate=0.1,
-                attention_dropout_rate=0.0,
-                input_layer='conv2d',  # encoder input type, you can chose conv2d, conv2d6 and conv2d8
-                normalize_before=True,
-                # use_cnn_module=True,
-                # cnn_module_kernel=15,
-                # activation_type='swish',
-                # pos_enc_layer_type='rel_pos',
-                # selfattention_layer_type='rel_selfattn', 
-            ))
-        # decoder related
-        default.decoder = 'transformer'
-        default.decoder_conf = CfgNode(
-            dict(
-                attention_heads=4,
-                linear_units=2048,
-                num_blocks=6,
-                dropout_rate=0.1,
-                positional_dropout_rate=0.1,
-                self_attention_dropout_rate=0.0,
-                src_attention_dropout_rate=0.0, ))
-        # hybrid CTC/attention
-        default.model_conf = CfgNode(
-            dict(
-                asr_weight=0.0,
-                ctc_weight=0.0,
-                lsm_weight=0.1,  # label smoothing option
-                length_normalized_loss=False, ))
-
-        if config is not None:
-            config.merge_from_other_cfg(default)
-        return default
-
     def __init__(self,
                  vocab_size: int,
                  encoder: TransformerEncoder,
                  st_decoder: TransformerDecoder,
-                 decoder: TransformerDecoder=None,
-                 ctc: CTCDecoder=None,
-                 ctc_weight: float=0.0,
-                 asr_weight: float=0.0,
-                 ignore_id: int=IGNORE_ID,
-                 lsm_weight: float=0.0,
-                 length_normalized_loss: bool=False,
+                 decoder: TransformerDecoder = None,
+                 ctc: CTCDecoderBase = None,
+                 ctc_weight: float = 0.0,
+                 asr_weight: float = 0.0,
+                 ignore_id: int = IGNORE_ID,
+                 lsm_weight: float = 0.0,
+                 length_normalized_loss: bool = False,
                  **kwargs):
         assert 0.0 <= ctc_weight <= 1.0, ctc_weight
 
@@ -289,8 +236,8 @@ class U2STBaseModel(nn.Layer):
             simulate_streaming (bool, optional): streaming or not. Defaults to False.
 
         Returns:
-            Tuple[paddle.Tensor, paddle.Tensor]: 
-                encoder hiddens (B, Tmax, D), 
+            Tuple[paddle.Tensor, paddle.Tensor]:
+                encoder hiddens (B, Tmax, D),
                 encoder hiddens mask (B, 1, Tmax).
         """
         # Let's assume B = batch_size
@@ -314,16 +261,19 @@ class U2STBaseModel(nn.Layer):
             self,
             speech: paddle.Tensor,
             speech_lengths: paddle.Tensor,
-            beam_size: int=10,
-            word_reward: float=0.0,
-            decoding_chunk_size: int=-1,
-            num_decoding_left_chunks: int=-1,
-            simulate_streaming: bool=False, ) -> paddle.Tensor:
-        """ Apply beam search on attention decoder
+            beam_size: int = 10,
+            word_reward: float = 0.0,
+            maxlenratio: float = 0.5,
+            decoding_chunk_size: int = -1,
+            num_decoding_left_chunks: int = -1,
+            simulate_streaming: bool = False, ) -> paddle.Tensor:
+        """ Apply beam search on attention decoder with length penalty
         Args:
             speech (paddle.Tensor): (batch, max_len, feat_dim)
             speech_length (paddle.Tensor): (batch, )
             beam_size (int): beam size for beam search
+            word_reward (float): word reward used in beam search
+            maxlenratio (float): max length ratio to bound the length of translated text
             decoding_chunk_size (int): decoding chunk for dynamic chunk
                 trained model.
                 <0: for decoding, use full chunk.
@@ -336,90 +286,89 @@ class U2STBaseModel(nn.Layer):
         """
         assert speech.shape[0] == speech_lengths.shape[0]
         assert decoding_chunk_size != 0
+        assert speech.shape[0] == 1
         device = speech.place
-        batch_size = speech.shape[0]
 
         # Let's assume B = batch_size and N = beam_size
-        # 1. Encoder
+        # 1. Encoder and init hypothesis
         encoder_out, encoder_mask = self._forward_encoder(
             speech, speech_lengths, decoding_chunk_size,
             num_decoding_left_chunks,
             simulate_streaming)  # (B, maxlen, encoder_dim)
-        maxlen = encoder_out.shape[1]
-        encoder_dim = encoder_out.shape[2]
-        running_size = batch_size * beam_size
-        encoder_out = encoder_out.unsqueeze(1).repeat(1, beam_size, 1, 1).view(
-            running_size, maxlen, encoder_dim)  # (B*N, maxlen, encoder_dim)
-        encoder_mask = encoder_mask.unsqueeze(1).repeat(
-            1, beam_size, 1, 1).view(running_size, 1,
-                                     maxlen)  # (B*N, 1, max_len)
 
-        hyps = paddle.ones(
-            [running_size, 1], dtype=paddle.long).fill_(self.sos)  # (B*N, 1)
-        # log scale score
-        scores = paddle.to_tensor(
-            [0.0] + [-float('inf')] * (beam_size - 1), dtype=paddle.float)
-        scores = scores.to(device).repeat(batch_size).unsqueeze(1).to(
-            device)  # (B*N, 1)
-        end_flag = paddle.zeros_like(scores, dtype=paddle.bool)  # (B*N, 1)
-        cache: Optional[List[paddle.Tensor]] = None
+        maxlen = max(int(encoder_out.shape[1] * maxlenratio), 5)
+
+        hyp = {"score": 0.0, "yseq": [self.sos], "cache": None}
+        hyps = [hyp]
+        ended_hyps = []
+        cur_best_score = -float("inf")
+        cache = None
+
         # 2. Decoder forward step by step
         for i in range(1, maxlen + 1):
-            # Stop if all batch and all beam produce eos
-            # TODO(Hui Zhang): if end_flag.sum() == running_size:
-            if end_flag.cast(paddle.int64).sum() == running_size:
-                break
+            ys = paddle.ones((len(hyps), i), dtype=paddle.long)
 
-            # 2.1 Forward decoder step
-            hyps_mask = subsequent_mask(i).unsqueeze(0).repeat(
-                running_size, 1, 1).to(device)  # (B*N, i, i)
-            # logp: (B*N, vocab)
+            if hyps[0]["cache"] is not None:
+                cache = [
+                    paddle.ones(
+                        (len(hyps), i - 1, hyp_cache.shape[-1]),
+                        dtype=paddle.float32) for hyp_cache in hyps[0]["cache"]
+                ]
+            for j, hyp in enumerate(hyps):
+                ys[j, :] = paddle.to_tensor(hyp["yseq"])
+                if hyps[0]["cache"] is not None:
+                    for k in range(len(cache)):
+                        cache[k][j] = hyps[j]["cache"][k]
+            ys_mask = subsequent_mask(i).unsqueeze(0).to(device)
+
             logp, cache = self.st_decoder.forward_one_step(
-                encoder_out, encoder_mask, hyps, hyps_mask, cache)
+                encoder_out.repeat(len(hyps), 1, 1),
+                encoder_mask.repeat(len(hyps), 1, 1), ys, ys_mask, cache)
 
-            # 2.2 First beam prune: select topk best prob at current time
-            top_k_logp, top_k_index = logp.topk(beam_size)  # (B*N, N)
-            top_k_logp += word_reward
-            top_k_logp = mask_finished_scores(top_k_logp, end_flag)
-            top_k_index = mask_finished_preds(top_k_index, end_flag, self.eos)
+            hyps_best_kept = []
+            for j, hyp in enumerate(hyps):
+                top_k_logp, top_k_index = logp[j:j + 1].topk(beam_size)
 
-            # 2.3 Seconde beam prune: select topk score with history
-            scores = scores + top_k_logp  # (B*N, N), broadcast add
-            scores = scores.view(batch_size, beam_size * beam_size)  # (B, N*N)
-            scores, offset_k_index = scores.topk(k=beam_size)  # (B, N)
-            scores = scores.view(-1, 1)  # (B*N, 1)
+                for b in range(beam_size):
+                    new_hyp = {}
+                    new_hyp["score"] = hyp["score"] + float(top_k_logp[0, b])
+                    new_hyp["yseq"] = [0] * (1 + len(hyp["yseq"]))
+                    new_hyp["yseq"][:len(hyp["yseq"])] = hyp["yseq"]
+                    new_hyp["yseq"][len(hyp["yseq"])] = int(top_k_index[0, b])
+                    new_hyp["cache"] = [cache_[j] for cache_ in cache]
+                    # will be (2 x beam) hyps at most
+                    hyps_best_kept.append(new_hyp)
 
-            # 2.4. Compute base index in top_k_index,
-            # regard top_k_index as (B*N*N),regard offset_k_index as (B*N),
-            # then find offset_k_index in top_k_index
-            base_k_index = paddle.arange(batch_size).view(-1, 1).repeat(
-                1, beam_size)  # (B, N)
-            base_k_index = base_k_index * beam_size * beam_size
-            best_k_index = base_k_index.view(-1) + offset_k_index.view(
-                -1)  # (B*N)
+                hyps_best_kept = sorted(
+                    hyps_best_kept, key=lambda x: -x["score"])[:beam_size]
 
-            # 2.5 Update best hyps
-            best_k_pred = paddle.index_select(
-                top_k_index.view(-1), index=best_k_index, axis=0)  # (B*N)
-            best_hyps_index = best_k_index // beam_size
-            last_best_k_hyps = paddle.index_select(
-                hyps, index=best_hyps_index, axis=0)  # (B*N, i)
-            hyps = paddle.cat(
-                (last_best_k_hyps, best_k_pred.view(-1, 1)),
-                dim=1)  # (B*N, i+1)
+            # sort and get nbest
+            hyps = hyps_best_kept
+            if i == maxlen:
+                for hyp in hyps:
+                    hyp["yseq"].append(self.eos)
 
-            # 2.6 Update end flag
-            end_flag = paddle.eq(hyps[:, -1], self.eos).view(-1, 1)
+            # finalize the ended hypotheses with word reward (by length)
+            remained_hyps = []
+            for hyp in hyps:
+                if hyp["yseq"][-1] == self.eos:
+                    hyp["score"] += (i - 1) * word_reward
+                    cur_best_score = max(cur_best_score, hyp["score"])
+                    ended_hyps.append(hyp)
+                else:
+                    # stop while guarantee the optimality
+                    if hyp["score"] + maxlen * word_reward > cur_best_score:
+                        remained_hyps.append(hyp)
+
+            # stop predition when there is no unended hypothesis
+            if not remained_hyps:
+                break
+            hyps = remained_hyps
 
         # 3. Select best of best
-        scores = scores.view(batch_size, beam_size)
-        # TODO: length normalization
-        best_index = paddle.argmax(scores, axis=-1).long()  # (B)
-        best_hyps_index = best_index + paddle.arange(
-            batch_size, dtype=paddle.long) * beam_size
-        best_hyps = paddle.index_select(hyps, index=best_hyps_index, axis=0)
-        best_hyps = best_hyps[:, 1:]
-        return best_hyps
+        best_hyp = max(ended_hyps, key=lambda x: x["score"])
+
+        return paddle.to_tensor([best_hyp["yseq"][1:]])
 
     # @jit.to_static
     def subsampling_rate(self) -> int:
@@ -522,46 +471,33 @@ class U2STBaseModel(nn.Layer):
                feats_lengths: paddle.Tensor,
                text_feature: Dict[str, int],
                decoding_method: str,
-               lang_model_path: str,
-               beam_alpha: float,
-               beam_beta: float,
                beam_size: int,
-               cutoff_prob: float,
-               cutoff_top_n: int,
-               num_processes: int,
-               ctc_weight: float=0.0,
-               word_reward: float=0.0,
-               decoding_chunk_size: int=-1,
-               num_decoding_left_chunks: int=-1,
-               simulate_streaming: bool=False):
+               word_reward: float = 0.0,
+               maxlenratio: float = 0.5,
+               decoding_chunk_size: int = -1,
+               num_decoding_left_chunks: int = -1,
+               simulate_streaming: bool = False):
         """u2 decoding.
 
         Args:
-            feats (Tenosr): audio features, (B, T, D)
-            feats_lengths (Tenosr): (B)
+            feats (Tensor): audio features, (B, T, D)
+            feats_lengths (Tensor): (B)
             text_feature (TextFeaturizer): text feature object.
-            decoding_method (str): decoding mode, e.g. 
-                    'fullsentence', 
+            decoding_method (str): decoding mode, e.g.
+                    'fullsentence',
                     'simultaneous'
-            lang_model_path (str): lm path.
-            beam_alpha (float): lm weight.
-            beam_beta (float): length penalty.
             beam_size (int): beam size for search
-            cutoff_prob (float): for prune.
-            cutoff_top_n (int): for prune.
-            num_processes (int): 
-            ctc_weight (float, optional): ctc weight for attention rescoring decode mode. Defaults to 0.0.
             decoding_chunk_size (int, optional): decoding chunk size. Defaults to -1.
                     <0: for decoding, use full chunk.
                     >0: for decoding, use fixed chunk size as set.
-                    0: used for training, it's prohibited here. 
-            num_decoding_left_chunks (int, optional): 
+                    0: used for training, it's prohibited here.
+            num_decoding_left_chunks (int, optional):
                     number of left chunks for decoding. Defaults to -1.
             simulate_streaming (bool, optional): simulate streaming inference. Defaults to False.
 
         Raises:
             ValueError: when not support decoding_method.
-        
+
         Returns:
             List[List[int]]: transcripts.
         """
@@ -573,6 +509,7 @@ class U2STBaseModel(nn.Layer):
                 feats_lengths,
                 beam_size=beam_size,
                 word_reward=word_reward,
+                maxlenratio=maxlenratio,
                 decoding_chunk_size=decoding_chunk_size,
                 num_decoding_left_chunks=num_decoding_left_chunks,
                 simulate_streaming=simulate_streaming)
@@ -615,7 +552,7 @@ class U2STModel(U2STBaseModel):
             ValueError: raise when using not support encoder type.
 
         Returns:
-            int, nn.Layer, nn.Layer, nn.Layer: vocab size, encoder, decoder, ctc 
+            int, nn.Layer, nn.Layer, nn.Layer: vocab size, encoder, decoder, ctc
         """
         if configs['cmvn_file'] is not None:
             mean, istd = load_cmvn(configs['cmvn_file'],
@@ -655,14 +592,16 @@ class U2STModel(U2STBaseModel):
                                          **configs['decoder_conf'])
             # ctc decoder and ctc loss
             model_conf = configs['model_conf']
-            ctc = CTCDecoder(
+            dropout_rate = model_conf.get('ctc_dropout_rate', 0.0)
+            grad_norm_type = model_conf.get('ctc_grad_norm_type', None)
+            ctc = CTCDecoderBase(
                 odim=vocab_size,
                 enc_n_units=encoder.output_size(),
                 blank_id=0,
-                dropout_rate=model_conf['ctc_dropoutrate'],
+                dropout_rate=dropout_rate,
                 reduction=True,  # sum
                 batch_average=True,  # sum / batch_size
-                grad_norm_type=model_conf['ctc_grad_norm_type'])
+                grad_norm_type=grad_norm_type)
 
             return vocab_size, encoder, (st_decoder, decoder, ctc)
         else:

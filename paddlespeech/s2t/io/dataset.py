@@ -13,10 +13,8 @@
 # limitations under the License.
 # Modified from espnet(https://github.com/espnet/espnet)
 # Modified from wenet(https://github.com/wenet-e2e/wenet)
-from typing import Optional
-
+import jsonlines
 from paddle.io import Dataset
-from yacs.config import CfgNode
 
 from paddlespeech.s2t.frontend.utility import read_manifest
 from paddlespeech.s2t.utils.log import Log
@@ -28,22 +26,6 @@ logger = Log(__name__).getlog()
 
 class ManifestDataset(Dataset):
     @classmethod
-    def params(cls, config: Optional[CfgNode]=None) -> CfgNode:
-        default = CfgNode(
-            dict(
-                manifest="",
-                max_input_len=27.0,
-                min_input_len=0.0,
-                max_output_len=float('inf'),
-                min_output_len=0.0,
-                max_output_input_ratio=float('inf'),
-                min_output_input_ratio=0.0, ))
-
-        if config is not None:
-            config.merge_from_other_cfg(default)
-        return default
-
-    @classmethod
     def from_config(cls, config):
         """Build a ManifestDataset object from a config.
 
@@ -53,17 +35,17 @@ class ManifestDataset(Dataset):
         Returns:
             ManifestDataset: dataet object.
         """
-        assert 'manifest' in config.data
-        assert config.data.manifest
+        assert 'manifest' in config
+        assert config.manifest
 
         dataset = cls(
-            manifest_path=config.data.manifest,
-            max_input_len=config.data.max_input_len,
-            min_input_len=config.data.min_input_len,
-            max_output_len=config.data.max_output_len,
-            min_output_len=config.data.min_output_len,
-            max_output_input_ratio=config.data.max_output_input_ratio,
-            min_output_input_ratio=config.data.min_output_input_ratio, )
+            manifest_path=config.manifest,
+            max_input_len=config.max_input_len,
+            min_input_len=config.min_input_len,
+            max_output_len=config.max_output_len,
+            min_output_len=config.min_output_len,
+            max_output_input_ratio=config.max_output_input_ratio,
+            min_output_input_ratio=config.min_output_input_ratio, )
         return dataset
 
     def __init__(self,
@@ -103,7 +85,7 @@ class ManifestDataset(Dataset):
             min_output_len=min_output_len,
             max_output_input_ratio=max_output_input_ratio,
             min_output_input_ratio=min_output_input_ratio)
-        self._manifest.sort(key=lambda x: x["feat_shape"][0])
+        self._manifest.sort(key=lambda x: x["input"][0]["shape"][0])
 
     def __len__(self):
         return len(self._manifest)
@@ -184,37 +166,20 @@ class AudioDataset(Dataset):
         """
         assert batch_type in ['static', 'dynamic']
         # read manifest
-        data = read_manifest(data_file)
+        with jsonlines.open(data_file, 'r') as reader:
+            data = list(reader)
         if sort:
             data = sorted(data, key=lambda x: x["feat_shape"][0])
         if raw_wav:
-            assert data[0]['feat'].split(':')[0].splitext()[-1] not in ('.ark',
-                                                                        '.scp')
-            data = map(lambda x: (float(x['feat_shape'][0]) * 1000 / stride_ms))
+            path_suffix = data[0]['feat'].split(':')[0].splitext()[-1]
+            assert path_suffix not in ('.ark', '.scp')
+            # m second to n frame
+            data = list(
+                map(lambda x: (float(x['feat_shape'][0]) * 1000 / stride_ms),
+                    data))
 
         self.input_dim = data[0]['feat_shape'][1]
         self.output_dim = data[0]['token_shape'][1]
-
-        # with open(data_file, 'r') as f:
-        #     for line in f:
-        #         arr = line.strip().split('\t')
-        #         if len(arr) != 7:
-        #             continue
-        #         key = arr[0].split(':')[1]
-        #         tokenid = arr[5].split(':')[1]
-        #         output_dim = int(arr[6].split(':')[1].split(',')[1])
-        #         if raw_wav:
-        #             wav_path = ':'.join(arr[1].split(':')[1:])
-        #             duration = int(float(arr[2].split(':')[1]) * 1000 / 10)
-        #             data.append((key, wav_path, duration, tokenid))
-        #         else:
-        #             feat_ark = ':'.join(arr[1].split(':')[1:])
-        #             feat_info = arr[2].split(':')[1].split(',')
-        #             feat_dim = int(feat_info[1].strip())
-        #             num_frames = int(feat_info[0].strip())
-        #             data.append((key, feat_ark, num_frames, tokenid))
-        #             self.input_dim = feat_dim
-        #         self.output_dim = output_dim
 
         valid_data = []
         for i in range(len(data)):
@@ -223,17 +188,17 @@ class AudioDataset(Dataset):
             # remove too lang or too short utt for both input and output
             # to prevent from out of memory
             if length > max_length or length < min_length:
-                # logging.warn('ignore utterance {} feature {}'.format(
-                #     data[i][0], length))
                 pass
             elif token_length > token_max_length or token_length < token_min_length:
                 pass
             else:
                 valid_data.append(data[i])
+        logger.info(f"raw dataset len: {len(data)}")
         data = valid_data
+        num_data = len(data)
+        logger.info(f"dataset len after filter: {num_data}")
 
         self.minibatch = []
-        num_data = len(data)
         # Dynamic batch size
         if batch_type == 'dynamic':
             assert (max_frames_in_batch > 0)
@@ -258,7 +223,9 @@ class AudioDataset(Dataset):
                 cur = end
 
     def __len__(self):
+        """number of example(batch)"""
         return len(self.minibatch)
 
     def __getitem__(self, idx):
+        """batch example of idx"""
         return self.minibatch[idx]

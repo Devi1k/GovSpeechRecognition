@@ -31,6 +31,7 @@ import_alias = dict(
     freq_mask="paddlespeech.s2t.transform.spec_augment:FreqMask",
     spec_augment="paddlespeech.s2t.transform.spec_augment:SpecAugment",
     speed_perturbation="paddlespeech.s2t.transform.perturb:SpeedPerturbation",
+    speed_perturbation_sox="paddlespeech.s2t.transform.perturb:SpeedPerturbationSox",
     volume_perturbation="paddlespeech.s2t.transform.perturb:VolumePerturbation",
     noise_injection="paddlespeech.s2t.transform.perturb:NoiseInjection",
     bandpass_perturbation="paddlespeech.s2t.transform.perturb:BandpassPerturbation",
@@ -45,7 +46,8 @@ import_alias = dict(
     stft2fbank="paddlespeech.s2t.transform.spectrogram:Stft2LogMelSpectrogram",
     wpe="paddlespeech.s2t.transform.wpe:WPE",
     channel_selector="paddlespeech.s2t.transform.channel_selector:ChannelSelector",
-)
+    fbank_kaldi="paddlespeech.s2t.transform.spectrogram:LogMelSpectrogramKaldi",
+    cmvn_json="paddlespeech.s2t.transform.cmvn:GlobalCMVN")
 
 
 class Transformation():

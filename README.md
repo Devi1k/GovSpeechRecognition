@@ -8,19 +8,16 @@ klm_file into data/lm
 data_aishell.tgz into examples/dataset/data_shell
 
 ```shell
-# source the environment
-cd examples/aishell/s0
-source path.sh
-source parse_options.sh`
-
-# prepare data
-bash ./local/data.sh
+# start paddlespeech server
+conda activate CrossWOZ
+cd ../PaddleSpeech/demos/speech_server/
+nohup python start_server.py > /dev/null 2>&1 &
 ```
 
 ```
 cd GovSpeechRecognition
 # source the environment
-conda activate env
+
 # run program
-make run
+nohup python3 manage.py runserver 0.0.0.0:5555 > /dev/null 2>&1 &
 ```

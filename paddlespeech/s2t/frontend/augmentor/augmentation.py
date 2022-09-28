@@ -16,6 +16,7 @@ import json
 import os
 from collections.abc import Sequence
 from inspect import signature
+from pprint import pformat
 
 import numpy as np
 
@@ -118,8 +119,8 @@ class AugmentationPipeline():
             'audio')
         self._spec_augmentors, self._spec_rates = self._parse_pipeline_from(
             'feature')
-        # logger.info(
-        #     f"Augmentation: {pformat(list(zip(self._augmentors, self._rates)))}")
+        logger.info(
+            f"Augmentation: {pformat(list(zip(self._augmentors, self._rates)))}")
 
     def __call__(self, xs, uttid_list=None, **kwargs):
         if not isinstance(xs, Sequence):
@@ -154,8 +155,8 @@ class AugmentationPipeline():
                     else:
                         xs = [func(x, **_kwargs) for x in xs]
                 except Exception:
-                    # logger.fatal("Catch a exception from {}th func: {}".format(
-                    #     idx, func))
+                    logger.fatal("Catch a exception from {}th func: {}".format(
+                        idx, func))
                     raise
         else:
             raise NotImplementedError(

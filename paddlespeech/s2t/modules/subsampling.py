@@ -1,4 +1,5 @@
 # Copyright (c) 2021 PaddlePaddle Authors. All Rights Reserved.
+# Copyright 2019 Mobvoi Inc. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +19,9 @@ from typing import Tuple
 import paddle
 from paddle import nn
 
+from paddlespeech.s2t.modules.align import Conv2D
+from paddlespeech.s2t.modules.align import LayerNorm
+from paddlespeech.s2t.modules.align import Linear
 from paddlespeech.s2t.modules.embedding import PositionalEncoding
 from paddlespeech.s2t.utils.log import Log
 
@@ -59,8 +63,8 @@ class LinearNoSubsampling(BaseSubsampling):
         """
         super().__init__(pos_enc_class)
         self.out = nn.Sequential(
-            nn.Linear(idim, odim),
-            nn.LayerNorm(odim, epsilon=1e-12),
+            Linear(idim, odim),
+            LayerNorm(odim, epsilon=1e-12),
             nn.Dropout(dropout_rate),
             nn.ReLU(), )
         self.right_context = 0
@@ -107,12 +111,12 @@ class Conv2dSubsampling4(Conv2dSubsampling):
         """
         super().__init__(pos_enc_class)
         self.conv = nn.Sequential(
-            nn.Conv2D(1, odim, 3, 2),
+            Conv2D(1, odim, 3, 2),
             nn.ReLU(),
-            nn.Conv2D(odim, odim, 3, 2),
+            Conv2D(odim, odim, 3, 2),
             nn.ReLU(), )
         self.out = nn.Sequential(
-            nn.Linear(odim * (((idim - 1) // 2 - 1) // 2), odim))
+            Linear(odim * (((idim - 1) // 2 - 1) // 2), odim))
         self.subsampling_rate = 4
         # The right context for every conv layer is computed by:
         # (kernel_size - 1) * frame_rate_of_this_layer
@@ -159,13 +163,13 @@ class Conv2dSubsampling6(Conv2dSubsampling):
         """
         super().__init__(pos_enc_class)
         self.conv = nn.Sequential(
-            nn.Conv2D(1, odim, 3, 2),
+            Conv2D(1, odim, 3, 2),
             nn.ReLU(),
-            nn.Conv2D(odim, odim, 5, 3),
+            Conv2D(odim, odim, 5, 3),
             nn.ReLU(), )
         # O = (I - F + Pstart + Pend) // S + 1
         # when Padding == 0, O = (I - F - S) // S
-        self.linear = nn.Linear(odim * (((idim - 1) // 2 - 2) // 3), odim)
+        self.linear = Linear(odim * (((idim - 1) // 2 - 2) // 3), odim)
         # The right context for every conv layer is computed by:
         # (kernel_size - 1) * frame_rate_of_this_layer
         # 10 = (3 - 1) * 1 + (5 - 1) * 2
@@ -211,14 +215,14 @@ class Conv2dSubsampling8(Conv2dSubsampling):
         """
         super().__init__(pos_enc_class)
         self.conv = nn.Sequential(
-            nn.Conv2D(1, odim, 3, 2),
+            Conv2D(1, odim, 3, 2),
             nn.ReLU(),
-            nn.Conv2D(odim, odim, 3, 2),
+            Conv2D(odim, odim, 3, 2),
             nn.ReLU(),
-            nn.Conv2D(odim, odim, 3, 2),
+            Conv2D(odim, odim, 3, 2),
             nn.ReLU(), )
-        self.linear = nn.Linear(odim * ((((idim - 1) // 2 - 1) // 2 - 1) // 2),
-                                odim)
+        self.linear = Linear(odim * ((((idim - 1) // 2 - 1) // 2 - 1) // 2),
+                             odim)
         self.subsampling_rate = 8
         # The right context for every conv layer is computed by:
         # (kernel_size - 1) * frame_rate_of_this_layer

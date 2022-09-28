@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Contains the text featurizer class."""
+from pprint import pformat
+from typing import Union
 
 import sentencepiece as spm
 
+from paddlespeech.s2t.utils.log import Log
 from ..utility import BLANK
 from ..utility import EOS
 from ..utility import MASKCTC
@@ -23,17 +26,13 @@ from ..utility import SPACE
 from ..utility import UNK
 from ..utility import load_dict
 
-# logger = Log(__name__).getlog()
+logger = Log(__name__).getlog()
 
 __all__ = ["TextFeaturizer"]
 
 
 class TextFeaturizer():
-    def __init__(self,
-                 unit_type,
-                 vocab_filepath,
-                 spm_model_prefix=None,
-                 maskctc=False):
+    def __init__(self, unit_type, vocab, spm_model_prefix=None, maskctc=False):
         """Text featurizer, for processing or extracting features from text.
 
         Currently, it supports char/word/sentence-piece level tokenizing and conversion into
@@ -42,7 +41,7 @@ class TextFeaturizer():
 
         Args:
             unit_type (str): unit type, e.g. char, word, spm
-            vocab_filepath (str): Filepath to load vocabulary for token indices conversion.
+            vocab Option[str, list]: Filepath to load vocabulary for token indices conversion, or vocab list.
             spm_model_prefix (str, optional): spm model prefix. Defaults to None.
         """
         assert unit_type in ('char', 'spm', 'word')
@@ -50,10 +49,12 @@ class TextFeaturizer():
         self.unk = UNK
         self.maskctc = maskctc
 
-        if vocab_filepath:
+        if vocab:
             self.vocab_dict, self._id2token, self.vocab_list, self.unk_id, self.eos_id, self.blank_id = self._load_vocabulary_from_file(
-                vocab_filepath, maskctc)
+                vocab, maskctc)
             self.vocab_size = len(self.vocab_list)
+        else:
+            logger.warning("TextFeaturizer: not have vocab file or vocab list.")
 
         if unit_type == 'spm':
             spm_model = spm_model_prefix + '.model'
@@ -90,7 +91,9 @@ class TextFeaturizer():
         tokens = self.tokenize(text)
         ids = []
         for token in tokens:
-            token = token if token in self.vocab_dict else self.unk
+            if token not in self.vocab_dict:
+                logger.debug(f"Text Token: {token} -> {self.unk}")
+                token = self.unk
             ids.append(self.vocab_dict[token])
         return ids
 
@@ -201,11 +204,15 @@ class TextFeaturizer():
 
         return decode(tokens)
 
-    def _load_vocabulary_from_file(self, vocab_filepath: str, maskctc: bool):
+    def _load_vocabulary_from_file(self, vocab: Union[str, list],
+                                   maskctc: bool):
         """Load vocabulary from file."""
-        vocab_list = load_dict(vocab_filepath, maskctc)
+        if isinstance(vocab, list):
+            vocab_list = vocab
+        else:
+            vocab_list = load_dict(vocab, maskctc)
         assert vocab_list is not None
-        # logger.debug(f"Vocab: {pformat(vocab_list)}")
+        logger.debug(f"Vocab: {pformat(vocab_list)}")
 
         id2token = dict(
             [(idx, token) for (idx, token) in enumerate(vocab_list)])
@@ -219,10 +226,10 @@ class TextFeaturizer():
         sos_id = vocab_list.index(SOS) if SOS in vocab_list else -1
         space_id = vocab_list.index(SPACE) if SPACE in vocab_list else -1
 
-        # logger.info(f"BLANK id: {blank_id}")
-        # logger.info(f"UNK id: {unk_id}")
-        # logger.info(f"EOS id: {eos_id}")
-        # logger.info(f"SOS id: {sos_id}")
-        # logger.info(f"SPACE id: {space_id}")
-        # logger.info(f"MASKCTC id: {maskctc_id}")
+        logger.info(f"BLANK id: {blank_id}")
+        logger.info(f"UNK id: {unk_id}")
+        logger.info(f"EOS id: {eos_id}")
+        logger.info(f"SOS id: {sos_id}")
+        logger.info(f"SPACE id: {space_id}")
+        logger.info(f"MASKCTC id: {maskctc_id}")
         return token2id, id2token, vocab_list, unk_id, eos_id, blank_id
